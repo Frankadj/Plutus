@@ -1,5 +1,15 @@
 import { C } from "../theme/colors";
-function ProfileScreen() {
+import useIsCompactLayout from "../hooks/useIsCompactLayout";
+import type { ThemeMode } from "../lib/theme";
+
+type ProfileScreenProps = {
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
+};
+
+function ProfileScreen({ themeMode, onThemeModeChange }: ProfileScreenProps) {
+  const isCompactLayout = useIsCompactLayout();
+
   return (
     <div>
       <div style={{ marginBottom: "24px" }}>
@@ -25,7 +35,7 @@ function ProfileScreen() {
               height: "56px",
               borderRadius: "999px",
               background: C.green,
-              color: "#000",
+              color: C.textInverse,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -65,8 +75,51 @@ function ProfileScreen() {
       >
         <ProfileRow title="Account & Security" subtitle="PIN, account details, login settings" />
         <ProfileRow title="Notifications" subtitle="Price alerts and app notifications" />
-        <ProfileRow title="Appearance" subtitle="Theme and display preferences" />
         <ProfileRow title="Help & Support" subtitle="FAQs, contact, and assistance" isLast />
+      </div>
+
+      <div
+        style={{
+          border: `1px solid ${C.border}`,
+          borderRadius: "16px",
+          padding: "20px",
+          background: C.card,
+          marginBottom: "20px",
+        }}
+      >
+        <div
+          style={{
+            color: C.text,
+            fontSize: "16px",
+            fontWeight: 600,
+            marginBottom: "8px",
+          }}
+        >
+          Appearance
+        </div>
+
+        <div style={{ color: C.sub, fontSize: "14px", marginBottom: "14px" }}>
+          Choose between dark mode and light mode
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isCompactLayout ? "1fr" : "1fr 1fr",
+            gap: 10,
+          }}
+        >
+          <ThemeButton
+            label="Dark"
+            active={themeMode === "dark"}
+            onClick={() => onThemeModeChange("dark")}
+          />
+          <ThemeButton
+            label="Light"
+            active={themeMode === "light"}
+            onClick={() => onThemeModeChange("light")}
+          />
+        </div>
       </div>
 
       <div
@@ -155,6 +208,35 @@ function ProfileRow({ title, subtitle, isLast = false }: ProfileRowProps) {
 
       <div style={{ color: C.sub, fontSize: "18px" }}>›</div>
     </div>
+  );
+}
+
+function ThemeButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: `1px solid ${active ? C.green : C.border}`,
+        borderRadius: "12px",
+        padding: "10px 12px",
+        background: active ? C.green : "transparent",
+        color: active ? C.textInverse : C.text,
+        fontWeight: 700,
+        fontSize: "14px",
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

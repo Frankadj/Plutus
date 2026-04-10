@@ -1,4 +1,6 @@
 import { C } from "../theme/colors";
+import useIsCompactLayout from "../hooks/useIsCompactLayout";
+import NewsThumbnail from "./NewsThumbnail";
 
 type NewsItem = {
   id: string | number;
@@ -15,6 +17,8 @@ type Props = {
 };
 
 function NewsScreen({ items, onBack }: Props) {
+  const isCompactLayout = useIsCompactLayout();
+
   return (
     <div
       style={{
@@ -29,37 +33,57 @@ function NewsScreen({ items, onBack }: Props) {
           width: "100%",
           maxWidth: "900px",
           margin: "0 auto",
-          padding: "2rem",
+          padding: isCompactLayout ? "14px 14px 24px" : "18px 20px 28px",
           boxSizing: "border-box",
         }}
       >
-        <button
-          onClick={onBack}
+        <div
           style={{
-            marginBottom: "24px",
-            padding: "8px 14px",
-            borderRadius: "999px",
-            border: `1px solid ${C.border}`,
-            background: C.card,
-            color: C.text,
-            cursor: "pointer",
-            fontSize: "14px",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            marginBottom: 18,
           }}
         >
-          ← Back
-        </button>
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "none",
+              color: C.text,
+              cursor: "pointer",
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+            }}
+            aria-label="Go back"
+          >
+            <svg
+              width="30"
+              height="30"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke={C.text}
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </button>
 
-        <h1
-          style={{
-            margin: 0,
-            marginBottom: 24,
-            fontSize: "32px",
-            fontWeight: 600,
-            color: C.text,
-          }}
-        >
-          News
-        </h1>
+          <h1
+            style={{
+              margin: 0,
+              fontSize: isCompactLayout ? "28px" : "32px",
+              fontWeight: 600,
+              color: C.text,
+              lineHeight: 1.1,
+            }}
+          >
+            News
+          </h1>
+        </div>
 
         {items.length === 0 ? (
           <div style={{ color: C.sub }}>No news available</div>
@@ -82,7 +106,7 @@ function NewsScreen({ items, onBack }: Props) {
                   color: "inherit",
                 }}
               >
-                <div style={{ flex: 1 }}>
+                <div style={{ flex: 1, textAlign: "left" }}>
                   <div
                     style={{
                       fontSize: 16,
@@ -90,6 +114,7 @@ function NewsScreen({ items, onBack }: Props) {
                       lineHeight: 1.4,
                       marginBottom: 8,
                       color: C.text,
+                      textAlign: "left",
                     }}
                   >
                     {item.headline}
@@ -101,6 +126,7 @@ function NewsScreen({ items, onBack }: Props) {
                       gap: 8,
                       fontSize: 13,
                       color: C.sub,
+                      textAlign: "left",
                     }}
                   >
                     <span>{item.source}</span>
@@ -109,36 +135,12 @@ function NewsScreen({ items, onBack }: Props) {
                   </div>
                 </div>
 
-                <div
-                  style={{
-                    width: 90,
-                    height: 90,
-                    borderRadius: 10,
-                    background: "#FFFFFF",
-                    color: "#000000",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontWeight: 700,
-                    fontSize: 12,
-                    flexShrink: 0,
-                    overflow: "hidden",
-                  }}
-                >
-                  {item.image ? (
-                    <img
-                      src={item.image}
-                      alt={item.source}
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                      }}
-                    />
-                  ) : (
-                    item.source.slice(0, 4).toUpperCase()
-                  )}
-                </div>
+                <NewsThumbnail
+                  image={item.image}
+                  source={item.source}
+                  size={isCompactLayout ? 74 : 90}
+                  radius={10}
+                />
               </a>
             ))}
           </div>

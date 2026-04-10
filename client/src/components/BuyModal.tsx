@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { C } from "../theme/colors";
-import type { Position } from "../App";
+import type { PortfolioTransaction, Position } from "../App";
 
 type Props = {
   stock: {
@@ -11,6 +11,8 @@ type Props = {
   setCash: (val: number) => void;
   positions: Record<string, Position>;
   setPositions: (val: Record<string, Position>) => void;
+  transactions: PortfolioTransaction[];
+  setTransactions: (val: PortfolioTransaction[]) => void;
   onClose: () => void;
 };
 
@@ -20,6 +22,8 @@ function BuyModal({
   setCash,
   positions,
   setPositions,
+  transactions,
+  setTransactions,
   onClose,
 }: Props) {
   const [shares, setShares] = useState(1);
@@ -106,15 +110,34 @@ function BuyModal({
             }
 
             const current = positions[stock.symbol] || { shares: 0, totalCost: 0 };
+            const nextShares = current.shares + safeShares;
+            const nextTotalCost = current.totalCost + total;
 
             setCash(cash - total);
             setPositions({
               ...positions,
               [stock.symbol]: {
-                shares: current.shares + safeShares,
-                totalCost: current.totalCost + total,
+                shares: nextShares,
+                totalCost: nextTotalCost,
               },
             });
+            setTransactions([
+              ...transactions,
+              {
+                id: `${stock.symbol}-buy-${Date.now()}-${Math.random()
+                  .toString(36)
+                  .slice(2, 8)}`,
+                symbol: stock.symbol,
+                type: "buy",
+                shares: safeShares,
+                price: stock.price,
+                total,
+                timestamp: Date.now(),
+                realizedPnl: 0,
+                averageCostPerShare: nextShares > 0 ? nextTotalCost / nextShares : 0,
+                remainingSharesAfter: nextShares,
+              },
+            ]);
 
             onClose();
           }}

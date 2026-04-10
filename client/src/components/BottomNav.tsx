@@ -1,4 +1,5 @@
 import { C } from "../theme/colors";
+import useIsCompactLayout from "../hooks/useIsCompactLayout";
 
 type BottomNavProps = {
   activeTab: "home" | "market" | "profile";
@@ -62,6 +63,7 @@ function ProfileIcon({ active }: { active: boolean }) {
 }
 
 function BottomNav({ activeTab, onChangeTab }: BottomNavProps) {
+  const isCompactLayout = useIsCompactLayout();
   const items = [
     {
       key: "home" as const,
@@ -101,7 +103,9 @@ function BottomNav({ activeTab, onChangeTab }: BottomNavProps) {
           borderTop: `1px solid ${C.border}`,
           display: "flex",
           justifyContent: "space-around",
-          padding: "10px 0 14px",
+          padding: isCompactLayout
+            ? "10px 0 calc(10px + env(safe-area-inset-bottom, 0px))"
+            : "10px 0 14px",
         }}
       >
         {items.map((item) => {
@@ -120,7 +124,7 @@ function BottomNav({ activeTab, onChangeTab }: BottomNavProps) {
                 gap: 6,
                 cursor: "pointer",
                 color: active ? C.green : C.sub,
-                fontSize: 12,
+                fontSize: isCompactLayout ? 11 : 12,
                 fontWeight: active ? 600 : 400,
               }}
             >

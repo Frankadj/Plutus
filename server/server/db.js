@@ -35,11 +35,11 @@ function upsertHistoricalRow(row) {
     change_value: row.change_value ?? 0,
     change_percent: row.change_percent ?? 0,
     volume: row.volume ?? 0,
-    source: row.source ?? "GSE",
+    source: row.source ?? "KwayisiChart",
   });
 }
 
-function getHistoryBySymbol(symbol, range = "1M") {
+function getHistoryBySymbol(symbol, range = "1W") {
   const limits = {
     "1W": 5,
     "1M": 22,

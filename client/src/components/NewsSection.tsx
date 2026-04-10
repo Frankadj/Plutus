@@ -1,4 +1,6 @@
 import { C } from "../theme/colors";
+import NewsListSkeleton from "./NewsListSkeleton";
+import NewsThumbnail from "./NewsThumbnail";
 
 type NewsItem = {
   id: string | number;
@@ -12,9 +14,14 @@ type NewsItem = {
 type NewsSectionProps = {
   items: NewsItem[];
   onSeeMore: () => void;
+  isLoading: boolean;
 };
 
-function NewsSection({ items, onSeeMore }: NewsSectionProps) {
+function NewsSection({
+  items,
+  onSeeMore,
+  isLoading,
+}: NewsSectionProps) {
   const previewItems = items.slice(0, 4);
 
   return (
@@ -43,10 +50,22 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
         </h3>
       </div>
 
-      {previewItems.length === 0 ? (
-        <div style={{ color: C.sub }}>No news available</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {previewItems.length === 0 ? (
+          isLoading ? (
+            <NewsListSkeleton rows={3} thumbnailSize={70} compact />
+          ) : (
+            <div
+              style={{
+                color: C.sub,
+                padding: "6px 0 2px",
+              }}
+            >
+              No news available
+            </div>
+          )
+        ) : (
+          <>
           {previewItems.map((item, index) => (
             <a
               key={item.id}
@@ -64,7 +83,7 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
                 color: "inherit",
               }}
             >
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, textAlign: "left" }}>
                 <div
                   style={{
                     fontSize: 15,
@@ -72,6 +91,7 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
                     lineHeight: 1.35,
                     marginBottom: 8,
                     color: C.text,
+                    textAlign: "left",
                   }}
                 >
                   {item.headline}
@@ -83,6 +103,7 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
                     gap: 8,
                     fontSize: 12,
                     color: C.sub,
+                    textAlign: "left",
                   }}
                 >
                   <span>{item.source}</span>
@@ -91,36 +112,12 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
                 </div>
               </div>
 
-              <div
-                style={{
-                  width: 70,
-                  height: 70,
-                  borderRadius: 8,
-                  background: "#FFFFFF",
-                  color: "#000000",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontWeight: 700,
-                  fontSize: 12,
-                  flexShrink: 0,
-                  overflow: "hidden",
-                }}
-              >
-                {item.image ? (
-                  <img
-                    src={item.image}
-                    alt={item.source}
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                    }}
-                  />
-                ) : (
-                  item.source.slice(0, 4).toUpperCase()
-                )}
-              </div>
+              <NewsThumbnail
+                image={item.image}
+                source={item.source}
+                size={70}
+                radius={8}
+              />
             </a>
           ))}
 
@@ -148,8 +145,9 @@ function NewsSection({ items, onSeeMore }: NewsSectionProps) {
               </button>
             </div>
           )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

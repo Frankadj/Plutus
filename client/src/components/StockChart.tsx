@@ -9,9 +9,48 @@ type ChartPoint = {
 type StockChartProps = {
   history: ChartPoint[];
   positive?: boolean;
+  onHoverChange?: (point: ChartPoint | null) => void;
 };
 
-function StockChart({ history, positive = true }: StockChartProps) {
+const chartDateFormatter = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+const chartDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function formatChartDate(date: string) {
+  const hasTime = date.includes("T");
+  const parsed = hasTime ? new Date(date) : new Date(`${date}T00:00:00`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    const retry = new Date(date);
+    if (Number.isNaN(retry.getTime())) {
+      return date;
+    }
+
+    return hasTime
+      ? chartDateTimeFormatter.format(retry)
+      : chartDateFormatter.format(retry);
+  }
+
+  return hasTime
+    ? chartDateTimeFormatter.format(parsed)
+    : chartDateFormatter.format(parsed);
+}
+
+function StockChart({
+  history,
+  positive = true,
+  onHoverChange,
+}: StockChartProps) {
   const [hovered, setHovered] = useState<number | null>(null);
 
   const cleanedHistory = (history || []).filter(
@@ -31,8 +70,6 @@ function StockChart({ history, positive = true }: StockChartProps) {
           alignItems: "center",
           justifyContent: "center",
           color: C.sub,
-          border: `1px solid ${C.border}`,
-          borderRadius: 16,
           background: C.card,
         }}
       >
@@ -62,72 +99,140 @@ function StockChart({ history, positive = true }: StockChartProps) {
     hovered !== null
       ? Math.max(0, Math.min(cleanedHistory.length - 1, hovered))
       : null;
+  const hoveredX =
+    hoveredIndex !== null
+      ? (hoveredIndex / (values.length - 1)) * width
+      : null;
+  const hoveredY =
+    hoveredIndex !== null
+      ? height - ((values[hoveredIndex] - min) / range) * height
+      : null;
+  const hoveredDate =
+    hoveredIndex !== null
+      ? formatChartDate(cleanedHistory[hoveredIndex].date)
+      : "";
+  const tooltipWidth =
+    hoveredDate.length > 0 ? Math.min(240, hoveredDate.length * 7.2 + 22) : 0;
+  const tooltipX =
+    hoveredX !== null
+      ? Math.max(10, Math.min(width - tooltipWidth - 10, hoveredX - tooltipWidth / 2))
+      : 0;
+
+  const updateHovered = (
+    clientX: number,
+    rect: DOMRect,
+    pointerId?: number,
+    target?: EventTarget | null
+  ) => {
+    const x = ((clientX - rect.left) / rect.width) * width;
+    const index = Math.max(
+      0,
+      Math.min(values.length - 1, Math.round((x / width) * (values.length - 1)))
+    );
+
+    setHovered(index);
+    onHoverChange?.(cleanedHistory[index] || null);
+
+    if (
+      typeof pointerId === "number" &&
+      target &&
+      "setPointerCapture" in target &&
+      typeof target.setPointerCapture === "function"
+    ) {
+      target.setPointerCapture(pointerId);
+    }
+  };
 
   return (
     <div
       style={{
-        border: `1px solid ${C.border}`,
-        borderRadius: 16,
         background: C.card,
-        padding: 12,
+        padding: "12px 0 0",
       }}
     >
       <svg
         width="100%"
-        viewBox={`0 0 ${width} ${height}`}
+        viewBox={`0 0 ${width} ${height + 34}`}
         preserveAspectRatio="none"
-        style={{ height: 180, display: "block" }}
-        onMouseMove={(e) => {
+        style={{ height: 214, display: "block", overflow: "visible", touchAction: "none" }}
+        onPointerDown={(e) => {
           const rect = e.currentTarget.getBoundingClientRect();
-          const x = ((e.clientX - rect.left) / rect.width) * width;
-          const index = Math.round((x / width) * (values.length - 1));
-          setHovered(index);
+          updateHovered(e.clientX, rect, e.pointerId, e.currentTarget);
         }}
-        onMouseLeave={() => setHovered(null)}
+        onPointerMove={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          updateHovered(e.clientX, rect);
+        }}
+        onPointerLeave={() => {
+          setHovered(null);
+          onHoverChange?.(null);
+        }}
+        onPointerUp={() => {
+          setHovered(null);
+          onHoverChange?.(null);
+        }}
+        onPointerCancel={() => {
+          setHovered(null);
+          onHoverChange?.(null);
+        }}
       >
+        {hoveredX !== null && hoveredY !== null ? (
+          <>
+            <line
+              x1={hoveredX}
+              x2={hoveredX}
+              y1={28}
+              y2={height + 28}
+              stroke={C.sub}
+              strokeWidth="1"
+              strokeDasharray="4 4"
+              opacity="0.75"
+            />
+
+            <g transform={`translate(${tooltipX}, 0)`}>
+              <rect
+                x="0"
+                y="0"
+                width={tooltipWidth}
+                height="24"
+                rx="12"
+                fill={C.card}
+                stroke={C.border}
+              />
+              <text
+                x={tooltipWidth / 2}
+                y="16"
+                textAnchor="middle"
+                fill={C.text}
+                fontSize="11"
+                fontWeight="700"
+                fontFamily="Arial, sans-serif"
+              >
+                {hoveredDate}
+              </text>
+            </g>
+          </>
+        ) : null}
+
         <polyline
           fill="none"
           stroke={lineColor}
           strokeWidth="3"
           points={points}
+          transform="translate(0 28)"
         />
 
-        {hoveredIndex !== null && (
+        {hoveredX !== null && hoveredY !== null ? (
           <circle
-            cx={(hoveredIndex / (values.length - 1)) * width}
-            cy={height - ((values[hoveredIndex] - min) / range) * height}
+            cx={hoveredX}
+            cy={hoveredY + 28}
             r="5"
             fill={lineColor}
+            stroke={C.bg}
+            strokeWidth="2"
           />
-        )}
+        ) : null}
       </svg>
-
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginTop: 10,
-          fontSize: 12,
-          color: C.sub,
-        }}
-      >
-        <span>{cleanedHistory[0].date}</span>
-        <span>{cleanedHistory[cleanedHistory.length - 1].date}</span>
-      </div>
-
-      {hoveredIndex !== null && (
-        <div
-          style={{
-            marginTop: 10,
-            fontSize: 13,
-            color: C.text,
-            fontWeight: 600,
-          }}
-        >
-          {cleanedHistory[hoveredIndex].date} • ₵
-          {cleanedHistory[hoveredIndex].value.toFixed(2)}
-        </div>
-      )}
     </div>
   );
 }

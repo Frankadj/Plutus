@@ -1,0 +1,17 @@
+.bin/
+.codex
+.vscode/
+node_modules/
+client/node_modules/
+client/dist/
+server/node_modules/
+server/plutus.db
+server/plutus.db-*
+server/.env*
+client/.env*
+!client/.env.android.example
+android-sdk/
+jdk-21/
+jdk21.tar.gz
+plutus.zip
+*.log
