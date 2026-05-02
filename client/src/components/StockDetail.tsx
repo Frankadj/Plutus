@@ -13,6 +13,10 @@ import type { PortfolioTransaction, Position } from "../App";
 import useIsCompactLayout from "../hooks/useIsCompactLayout";
 import { getApiBase } from "../lib/api";
 import {
+  getKwayisiEquityUrl,
+  shouldUseDirectKwayisiBrowserData,
+} from "../lib/kwayisi";
+import {
   readPriceAlert,
   removePriceAlert,
   savePriceAlert,
@@ -39,6 +43,8 @@ type Stock = {
   name: string;
   companyName?: string;
   sector?: string;
+  website?: string;
+  logoUrl?: string;
   price: number;
   change: number;
   changePercent: number;
@@ -59,6 +65,10 @@ type CompanyInfo = {
 type StockProfileResponse = {
   companyName?: string;
   description?: string;
+  sector?: string;
+  industry?: string;
+  website?: string;
+  logoUrl?: string;
   capital?: number | null;
   dps?: number | null;
   eps?: number | null;
@@ -67,7 +77,33 @@ type StockProfileResponse = {
   dividendYield?: number | null;
   company?: {
     name?: string;
+    address?: string;
+    directors?: string[];
+    email?: string;
+    facsimile?: string;
     sector?: string;
+    industry?: string;
+    telephone?: string;
+    website?: string;
+    logoUrl?: string;
+  };
+};
+
+type KwayisiEquityResponse = {
+  capital?: number | string | null;
+  dps?: number | string | null;
+  eps?: number | string | null;
+  shares?: number | string | null;
+  company?: {
+    name?: string;
+    address?: string;
+    directors?: string[];
+    email?: string;
+    facsimile?: string;
+    industry?: string;
+    sector?: string;
+    telephone?: string;
+    website?: string;
   };
 };
 
@@ -221,6 +257,49 @@ function createFallbackCompanyInfo(stockName: string, symbol: string): CompanyIn
     description: "Company information not available.",
     companyName: stockName || symbol || "Not available",
     sector: "Not available",
+  };
+}
+
+function toNullableNumber(value: unknown) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function createKwayisiProfileResponse(
+  symbol: string,
+  stockName: string,
+  payload: KwayisiEquityResponse
+): StockProfileResponse {
+  const company = payload?.company || {};
+  const companyName = company.name || stockName || symbol;
+
+  return {
+    companyName,
+    description: "",
+    sector: company.sector || "",
+    industry: company.industry || "",
+    website: company.website || "",
+    logoUrl: "",
+    capital: toNullableNumber(payload?.capital),
+    dps: toNullableNumber(payload?.dps),
+    eps: toNullableNumber(payload?.eps),
+    shares: toNullableNumber(payload?.shares),
+    company: {
+      name: companyName,
+      address: company.address || "",
+      directors: Array.isArray(company.directors) ? company.directors : [],
+      email: company.email || "",
+      facsimile: company.facsimile || "",
+      industry: company.industry || "",
+      sector: company.sector || "",
+      telephone: company.telephone || "",
+      website: company.website || "",
+      logoUrl: "",
+    },
   };
 }
 
@@ -407,7 +486,9 @@ function StockDetail({
           cachedBootstrapProfile?.company?.name ||
           bootstrapCompanyInfo.companyName,
         sector:
-          cachedBootstrapProfile?.company?.sector || bootstrapCompanyInfo.sector,
+          cachedBootstrapProfile?.company?.sector ||
+          cachedBootstrapProfile?.sector ||
+          bootstrapCompanyInfo.sector,
       };
     }
 
@@ -420,7 +501,9 @@ function StockDetail({
           cachedBootstrapProfile.company?.name ||
           bootstrapCompanyInfo.companyName,
         sector:
-          cachedBootstrapProfile.company?.sector || bootstrapCompanyInfo.sector,
+          cachedBootstrapProfile.company?.sector ||
+          cachedBootstrapProfile.sector ||
+          bootstrapCompanyInfo.sector,
       };
     }
 
@@ -485,7 +568,9 @@ function StockDetail({
           cachedProfile?.company?.name ||
           bootstrapCompanyInfo.companyName,
         sector:
-          cachedProfile?.company?.sector || bootstrapCompanyInfo.sector,
+          cachedProfile?.company?.sector ||
+          cachedProfile?.sector ||
+          bootstrapCompanyInfo.sector,
       });
     } else if (cachedProfile) {
       setCompanyInfo({
@@ -494,7 +579,10 @@ function StockDetail({
           cachedProfile.companyName ||
           cachedProfile.company?.name ||
           bootstrapCompanyInfo.companyName,
-        sector: cachedProfile.company?.sector || bootstrapCompanyInfo.sector,
+        sector:
+          cachedProfile.company?.sector ||
+          cachedProfile.sector ||
+          bootstrapCompanyInfo.sector,
       });
     } else {
       setCompanyInfo(bootstrapCompanyInfo);
@@ -755,7 +843,9 @@ function StockDetail({
         cachedProfile?.company?.name ||
         bootstrapCompanyInfo.companyName;
       let resolvedSector =
-        cachedProfile?.company?.sector || bootstrapCompanyInfo.sector;
+        cachedProfile?.company?.sector ||
+        cachedProfile?.sector ||
+        bootstrapCompanyInfo.sector;
 
       if (cachedProfile) {
         setStockProfile(cachedProfile);
@@ -804,7 +894,10 @@ function StockDetail({
       })();
 
       try {
-        const stockRes = await fetch(`${apiBase}/api/stocks/${symbol}`, {
+        const stockProfileUrl = shouldUseDirectKwayisiBrowserData()
+          ? getKwayisiEquityUrl(symbol)
+          : `${apiBase}/api/stocks/${symbol}`;
+        const stockRes = await fetch(stockProfileUrl, {
           signal: controller.signal,
         });
 
@@ -812,7 +905,14 @@ function StockDetail({
           throw new Error(`Failed to load stock detail: ${stockRes.status}`);
         }
 
-        const data: StockProfileResponse = await stockRes.json();
+        const rawData = await stockRes.json();
+        const data: StockProfileResponse = shouldUseDirectKwayisiBrowserData()
+          ? createKwayisiProfileResponse(
+              symbol,
+              stock.companyName || stock.name,
+              rawData as KwayisiEquityResponse
+            )
+          : (rawData as StockProfileResponse);
         if (controller.signal.aborted) {
           return;
         }
@@ -823,7 +923,8 @@ function StockDetail({
           "Company information not available.";
         resolvedCompanyName =
           data.companyName || company.name || stock.name || symbol;
-        resolvedSector = company.sector || "Not available";
+        resolvedSector =
+          company.sector || data.sector || stock.sector || "Not available";
 
         setStockProfile(data);
         writeStockPageCache("profile", symbol, data, STOCK_PROFILE_CACHE_TTL_MS);
@@ -846,7 +947,9 @@ function StockDetail({
                   cachedProfile?.company?.name ||
                   bootstrapCompanyInfo.companyName,
                 sector:
-                  cachedProfile?.company?.sector || bootstrapCompanyInfo.sector,
+                  cachedProfile?.company?.sector ||
+                  cachedProfile?.sector ||
+                  bootstrapCompanyInfo.sector,
               }
             : cachedProfile
               ? {
@@ -857,7 +960,9 @@ function StockDetail({
                     cachedProfile.company?.name ||
                     bootstrapCompanyInfo.companyName,
                   sector:
-                    cachedProfile.company?.sector || bootstrapCompanyInfo.sector,
+                    cachedProfile.company?.sector ||
+                    cachedProfile.sector ||
+                    bootstrapCompanyInfo.sector,
                 }
               : bootstrapCompanyInfo
         );
@@ -996,9 +1101,21 @@ function StockDetail({
     stockProfile?.previousClose,
   ]);
 
-  const displayCompanyName = companyInfo.companyName || stock.name;
+  const displayCompanyName =
+    stockProfile?.companyName ||
+    stockProfile?.company?.name ||
+    companyInfo.companyName ||
+    stock.companyName ||
+    stock.name;
+  const displaySector =
+    stockProfile?.company?.sector ||
+    stockProfile?.sector ||
+    companyInfo.sector ||
+    stock.sector ||
+    bootstrapCompanyInfo.sector;
   const hasHistoryChart = history.length >= 2;
-  const previewPoint = hoveredHistoryPoint;
+  const latestHistoryPoint = hasHistoryChart ? history[history.length - 1] : null;
+  const previewPoint = hoveredHistoryPoint || latestHistoryPoint;
   const rangeStartPoint = hasHistoryChart ? history[0] : null;
   const displayPriceTarget = previewPoint
     ? previewPoint.value
@@ -1020,7 +1137,7 @@ function StockDetail({
     hasHistoryChart && rangeStartPoint
       ? history[history.length - 1].value >= rangeStartPoint.value
       : Number(stock.change) >= 0;
-  const detailGridColumns = isCompactLayout ? "1fr" : "1fr 1fr";
+  const detailGridColumns = "repeat(2, minmax(0, 1fr))";
 
   return (
     <div
@@ -1066,7 +1183,11 @@ function StockDetail({
           </svg>
         </button>
 
-        <TickerLogo symbol={symbol} size={isCompactLayout ? 42 : 50} />
+        <TickerLogo
+          symbol={symbol}
+          size={isCompactLayout ? 42 : 50}
+          logoUrl={stockProfile?.company?.logoUrl || stockProfile?.logoUrl || stock.logoUrl}
+        />
 
         <div style={{ minWidth: 0 }}>
           <div
@@ -1480,7 +1601,7 @@ function StockDetail({
                 lineHeight: 1.4,
               }}
             >
-              {companyInfo.sector}
+              {displaySector}
             </div>
           </div>
         </div>

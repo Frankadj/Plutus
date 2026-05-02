@@ -92,7 +92,11 @@ function StockCard({ stock, onSelect, sparklineValues }: StockCardProps) {
           flex: 1,
         }}
       >
-        <TickerLogo symbol={symbol} size={isCompactLayout ? 38 : 42} />
+        <TickerLogo
+          symbol={symbol}
+          size={isCompactLayout ? 38 : 42}
+          logoUrl={stock.logoUrl}
+        />
 
         <div style={{ minWidth: 0 }}>
           <div

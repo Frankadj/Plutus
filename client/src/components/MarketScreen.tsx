@@ -203,7 +203,11 @@ function MarketScreen({ stocks, apiBase, onOpenHeatmap, onSelect }: Props) {
                       flex: 1,
                     }}
                   >
-                    <TickerLogo symbol={symbol} size={isCompactLayout ? 36 : 42} />
+                    <TickerLogo
+                      symbol={symbol}
+                      size={isCompactLayout ? 36 : 42}
+                      logoUrl={stock.logoUrl}
+                    />
 
                     <div style={{ minWidth: 0 }}>
                       <div

@@ -1,0 +1,8 @@
+{
+  "appId": "com.plutus.app",
+  "appName": "Plutus",
+  "webDir": "client/dist",
+  "server": {
+    "cleartext": true
+  }
+}

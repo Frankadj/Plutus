@@ -135,7 +135,6 @@ function PortfolioCard({
       .sort((left, right) => left.symbol.localeCompare(right.symbol));
   }, [positions]);
 
-  const hasAnyPosition = positionEntries.length > 0;
   const totalHoldingsValue = positionEntries.reduce(
     (sum, entry) => sum + toNumber(stockMap[entry.symbol]?.price) * entry.shares,
     0
@@ -500,17 +499,6 @@ function PortfolioCard({
         <ChartPeriodTabs period={period} onChange={handlePeriodChange} />
       </div>
 
-      {!hasPortfolioChart && !hasRecordedTrades && !hasAnyPosition ? (
-        <div
-          style={{
-            marginTop: 18,
-            color: C.sub,
-            fontSize: 14,
-          }}
-        >
-          Add holdings to see the investing chart.
-        </div>
-      ) : null}
     </div>
   );
 }

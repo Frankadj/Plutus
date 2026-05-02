@@ -1,19 +1,48 @@
 const express = require("express");
 const cors = require("cors");
 const Database = require("better-sqlite3");
+const dns = require("dns");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const path = require("path");
 const Parser = require("rss-parser");
-const { execFile } = require("child_process");
-const { promisify } = require("util");
 
-const execFileAsync = promisify(execFile);
+// Cloud Run can prefer IPv6 answers that stall against some upstream sites.
+dns.setDefaultResultOrder("ipv4first");
+
+function readBundledJsonArray(filePath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function readBundledJsonObject(filePath) {
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
-const HOST = process.env.HOST || "::";
+const HOST = process.env.HOST || "0.0.0.0";
+const IS_CLOUD_RUN = Boolean(process.env.K_SERVICE);
 const CLIENT_DIST_DIR = path.resolve(__dirname, "../client/dist");
 const CLIENT_INDEX_PATH = path.join(CLIENT_DIST_DIR, "index.html");
+const LIVE_STOCKS_SNAPSHOT_PATH = path.resolve(
+  __dirname,
+  "./data/live-stocks-snapshot.json"
+);
+const GSE_INDICES_SNAPSHOT_PATH = path.resolve(
+  __dirname,
+  "./data/gse-indices-snapshot.json"
+);
 const ANDROID_DEBUG_APK_PATH = path.resolve(
   __dirname,
   "../android/app/build/outputs/apk/debug/app-debug.apk"
@@ -34,6 +63,9 @@ const NEWS_REQUEST_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 PlutusNews/1.0",
   Accept: "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+};
+const KWAYISI_REQUEST_HEADERS = {
+  "User-Agent": "Plutus/1.0 (GSE market data app)",
 };
 const WIKIPEDIA_REQUEST_HEADERS = {
   "User-Agent":
@@ -60,11 +92,14 @@ const HOME_NEWS_MAX_ITEMS = 12;
 const LIVE_STOCKS_CACHE_TTL_MS = 20 * 1000;
 const LIVE_STOCKS_RATE_LIMIT_COOLDOWN_MS = 45 * 1000;
 const KWAYISI_DEFAULT_TIMEOUT_MS = 4500;
+const KWAYISI_RETRY_TIMEOUT_MS = 12000;
 const KWAYISI_RATE_LIMIT_COOLDOWN_MS = 90 * 1000;
 const KWAYISI_RESOURCE_ERROR_COOLDOWN_MS = 25 * 1000;
 const KWAYISI_PROFILE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const KWAYISI_NOT_FOUND_CACHE_TTL_MS = 60 * 1000;
 const STOCK_DETAIL_CACHE_TTL_MS = 20 * 1000;
+const COMPANY_WEBSITE_BRANDING_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const COMPANY_WEBSITE_TIMEOUT_MS = 4500;
 const HEATMAP_EQUITY_BATCH_SIZE = 6;
 const HISTORY_SCRAPE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const HISTORY_SCRAPE_ERROR_COOLDOWN_MS = 5 * 60 * 1000;
@@ -251,12 +286,20 @@ const newsSourceFailureState = new Map();
 const newsImageCache = new Map();
 const wikipediaAboutCache = new Map();
 const wikipediaAboutPending = new Map();
+const companyWebsiteBrandingCache = new Map();
+const companyWebsiteBrandingPending = new Map();
 const liveStocksCache = {
   fetchedAt: 0,
   items: [],
   pending: null,
   rateLimitedUntil: 0,
 };
+const BUNDLED_LIVE_STOCKS_SNAPSHOT = readBundledJsonArray(
+  LIVE_STOCKS_SNAPSHOT_PATH
+);
+const BUNDLED_GSE_INDICES_SNAPSHOT = readBundledJsonObject(
+  GSE_INDICES_SNAPSHOT_PATH
+);
 const kwayisiResourceCache = new Map();
 const kwayisiResourcePending = new Map();
 const kwayisiResourceErrorUntil = new Map();
@@ -411,6 +454,7 @@ const SYMBOL_NAME_MAP = {
   TLW: "Tullow Oil",
   TOTAL: "TotalEnergies Marketing Ghana",
   UNIL: "Unilever Ghana",
+  ZEN: "ZEN Petroleum Holdings Plc",
 };
 
 const SYMBOL_NEWS_ALIASES = {
@@ -475,8 +519,23 @@ const WIKIPEDIA_SYMBOL_ALIASES = {
 };
 
 const STOCK_ABOUT_OVERRIDES = {
+  ALLGH:
+    "Atlantic Lithium Limited is a lithium-focused exploration and development company advancing its flagship Ewoyaa Project in Ghana, West Africa toward production. The Ewoyaa Project is expected to become Ghana's first lithium mine, and the company also holds lithium tenure across Ghana and Cote d'Ivoire.",
   MTNGH:
     "Scancom PLC, trading as MTN Ghana, is a Ghanaian mobile telecommunications and digital services provider, a subsidiary of MTN Group, and a listed company on the Ghana Stock Exchange.",
+  ZEN:
+    "ZEN Petroleum is a Ghanaian-owned oil marketing company. It has established itself as a market leader supplying fuel and lubricants to mines in Ghana, with an expanding footprint in the African region and a growing retail network in Ghana.",
+};
+
+const STOCK_COMPANY_OVERRIDES = {
+  ZEN: {
+    companyName: "ZEN Petroleum Holdings Plc",
+    sector: "Oil & Gas",
+    industry: "Integrated Oil & Gas",
+    website: "https://www.zenpetroleum.com/",
+    logoUrl:
+      "https://cdn.prod.website-files.com/668273fd47a10d4c2307db45/668fe26e90d6d7d46fbc1b74_ZEN-256x256.jpg",
+  },
 };
 
 function normalizeWhitespace(value) {
@@ -1651,28 +1710,20 @@ async function refreshAllNewsItems() {
           url: "https://3news.com/feed.xml",
         })
       ),
-      runNewsSourceTask("CitiNewsroom", () =>
-        fetchRssNewsSource({
-          source: "CitiNewsroom",
-          url: "https://citinewsroom.com/feed/",
-        })
-      ),
-      runNewsSourceTask("NewsGhana", () =>
-        fetchRssNewsSource({
-          source: "NewsGhana",
-          url: "https://newsghana.com.gh/feed/",
-        })
+      runNewsSourceTask(
+        "NewsGhana",
+        () =>
+          fetchRssNewsSource({
+            source: "NewsGhana",
+            url: "https://www.newsghana.com.gh/feed/",
+            timeoutMs: 9000,
+          }),
+        11000
       ),
       runNewsSourceTask("B&FT", () =>
         fetchRssNewsSource({
           source: "B&FT",
           url: "https://thebftonline.com/feed/",
-        })
-      ),
-      runNewsSourceTask("NorvanReports", () =>
-        fetchRssNewsSource({
-          source: "NorvanReports",
-          url: "https://norvanreports.com/category/business/feed/",
         })
       ),
       runNewsSourceTask("Ghana Business News", () =>
@@ -1968,6 +2019,36 @@ function buildWikipediaAboutCandidates(symbol, companyName = "") {
   );
 }
 
+function canAttemptWikipediaAboutLookup(symbol, companyName = "") {
+  const upperSymbol = String(symbol || "").toUpperCase().trim();
+  const hasCuratedCandidate =
+    Boolean(WIKIPEDIA_TITLE_OVERRIDES[upperSymbol]) ||
+    (WIKIPEDIA_SYMBOL_ALIASES[upperSymbol] || []).length > 0 ||
+    (SYMBOL_NEWS_ALIASES[upperSymbol] || []).length > 0;
+
+  if (hasCuratedCandidate) {
+    return true;
+  }
+
+  const normalizedCompanyName = normalizeMatchPhrase(companyName);
+  const normalizedSymbol = normalizeMatchPhrase(upperSymbol);
+  const tokens = normalizedCompanyName.split(" ").filter(Boolean);
+
+  if (!normalizedCompanyName) {
+    return false;
+  }
+
+  if (tokens.length >= 2) {
+    return true;
+  }
+
+  if (normalizedCompanyName.includes("ghana")) {
+    return true;
+  }
+
+  return normalizedCompanyName !== normalizedSymbol && normalizedCompanyName.length > 4;
+}
+
 async function fetchWikipediaSummaryByTitle(title) {
   const normalizedTitle = normalizeWikipediaTitle(title);
   if (!normalizedTitle) {
@@ -2138,6 +2219,12 @@ function normalizeWikipediaSnippet(value) {
   return text;
 }
 
+function isWikipediaSearchSnippetSpecificEnough(candidate, result) {
+  return isWikipediaSummarySpecificEnough(candidate, {
+    pageTitle: String(result?.title || ""),
+  });
+}
+
 async function resolveStockAbout(symbol, options = {}) {
   const upperSymbol = String(symbol || "").toUpperCase().trim();
   if (!upperSymbol) {
@@ -2147,7 +2234,7 @@ async function resolveStockAbout(symbol, options = {}) {
     };
   }
 
-  const { companyName = "", fallbackDescription = "" } = options;
+  const { companyName = "", fallbackDescription = "", website = "" } = options;
   const cached = getWikipediaAboutCacheEntry(upperSymbol);
   if (cached) {
     return cached;
@@ -2158,7 +2245,28 @@ async function resolveStockAbout(symbol, options = {}) {
   }
 
   const pending = (async () => {
-    const candidates = buildWikipediaAboutCandidates(upperSymbol, companyName);
+    if (website) {
+      const websiteBranding = await resolveCompanyWebsiteBranding(upperSymbol, {
+        companyName,
+        website,
+      });
+
+      if (
+        isUsefulCompanyWebsiteDescription(
+          websiteBranding.description,
+          companyName,
+          upperSymbol
+        )
+      ) {
+        const payload = {
+          description: websiteBranding.description,
+          source: websiteBranding.source,
+          pageUrl: websiteBranding.website,
+        };
+        setWikipediaAboutCacheEntry(upperSymbol, payload);
+        return payload;
+      }
+    }
 
     if (STOCK_ABOUT_OVERRIDES[upperSymbol]) {
       const payload = {
@@ -2168,6 +2276,18 @@ async function resolveStockAbout(symbol, options = {}) {
       setWikipediaAboutCacheEntry(upperSymbol, payload);
       return payload;
     }
+
+    if (!canAttemptWikipediaAboutLookup(upperSymbol, companyName)) {
+      const payload = {
+        description:
+          normalizeWhitespace(fallbackDescription) || "Company information not available.",
+        source: fallbackDescription ? "kwayisi-fallback" : "fallback",
+      };
+      setWikipediaAboutCacheEntry(upperSymbol, payload, 60 * 60 * 1000);
+      return payload;
+    }
+
+    const candidates = buildWikipediaAboutCandidates(upperSymbol, companyName);
 
     for (const candidate of candidates.slice(0, 2)) {
       const summary = await fetchWikipediaSummaryByTitle(candidate);
@@ -2195,7 +2315,10 @@ async function resolveStockAbout(symbol, options = {}) {
           !bestSnippetMatch ||
           scored.score > bestSnippetMatch.score
         ) {
-          bestSnippetMatch = scored;
+          bestSnippetMatch = {
+            ...scored,
+            candidate,
+          };
         }
 
         if (scored.score >= 18) {
@@ -2214,7 +2337,14 @@ async function resolveStockAbout(symbol, options = {}) {
       }
     }
 
-    if (bestSnippetMatch && bestSnippetMatch.score >= 14) {
+    if (
+      bestSnippetMatch &&
+      bestSnippetMatch.score >= 14 &&
+      isWikipediaSearchSnippetSpecificEnough(
+        bestSnippetMatch.candidate,
+        bestSnippetMatch
+      )
+    ) {
       const payload = {
         description: normalizeWikipediaSnippet(bestSnippetMatch.snippet),
         source: "wikipedia-search",
@@ -2264,10 +2394,20 @@ function mapStock(item) {
   const changePercent = Number.isFinite(parsedChangePercent)
     ? parsedChangePercent
     : deriveChangePercent(price, change);
+  const companyOverride =
+    STOCK_COMPANY_OVERRIDES[String(rawSymbol || "").toUpperCase().trim()] || null;
 
   return {
     symbol,
     name:
+      companyOverride?.companyName ||
+      item.company ||
+      SYMBOL_NAME_MAP[symbol] ||
+      item.name ||
+      symbol ||
+      "Unknown",
+    companyName:
+      companyOverride?.companyName ||
       item.company ||
       SYMBOL_NAME_MAP[symbol] ||
       item.name ||
@@ -2277,12 +2417,364 @@ function mapStock(item) {
     change,
     changePercent,
     volume: Number(item.volume ?? item.tradeVolume ?? 0),
+    sector: companyOverride?.sector || "",
+    industry: companyOverride?.industry || "",
+    website: companyOverride?.website || "",
+    logoUrl: companyOverride?.logoUrl || "",
   };
 }
 
 function normalizeCompanyWebsite(url) {
   if (!url) return "";
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
+function getCompanyWebsiteBrandingCacheKey(url) {
+  const normalizedUrl = normalizeCompanyWebsite(url);
+  if (!normalizedUrl) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    return `${parsedUrl.protocol}//${parsedUrl.host}`.toLowerCase();
+  } catch {
+    return normalizedUrl.toLowerCase();
+  }
+}
+
+function getCompanyWebsiteBrandingCacheEntry(url, options = {}) {
+  const { allowExpired = false } = options;
+  const key = getCompanyWebsiteBrandingCacheKey(url);
+  if (!key) {
+    return null;
+  }
+
+  const entry = companyWebsiteBrandingCache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (allowExpired || entry.expiresAt > Date.now()) {
+    return entry.value;
+  }
+
+  return null;
+}
+
+function setCompanyWebsiteBrandingCacheEntry(
+  url,
+  value,
+  ttlMs = COMPANY_WEBSITE_BRANDING_CACHE_TTL_MS
+) {
+  const key = getCompanyWebsiteBrandingCacheKey(url);
+  if (!key) {
+    return;
+  }
+
+  companyWebsiteBrandingCache.set(key, {
+    value,
+    expiresAt: Date.now() + Math.max(1000, Number(ttlMs) || COMPANY_WEBSITE_BRANDING_CACHE_TTL_MS),
+  });
+}
+
+function getHtmlTagAttribute(tag, attributeName) {
+  const match = String(tag || "").match(
+    new RegExp(
+      `${attributeName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+      "i"
+    )
+  );
+
+  return normalizeWhitespace(
+    decodeHtmlEntities(match?.[1] || match?.[2] || match?.[3] || "")
+  );
+}
+
+function extractMetaTagContent(html, attributeName, attributeValue) {
+  const tags = String(html || "").match(/<meta\b[^>]*>/gi) || [];
+  const expectedValue = String(attributeValue || "").toLowerCase();
+
+  for (const tag of tags) {
+    const actualValue = getHtmlTagAttribute(tag, attributeName).toLowerCase();
+    if (actualValue !== expectedValue) {
+      continue;
+    }
+
+    const content = stripHtml(getHtmlTagAttribute(tag, "content"));
+    if (content) {
+      return content;
+    }
+  }
+
+  return "";
+}
+
+function extractLinkHrefByRel(html, relValues = []) {
+  const tags = String(html || "").match(/<link\b[^>]*>/gi) || [];
+
+  for (const expectedRel of relValues) {
+    const normalizedRel = String(expectedRel || "").toLowerCase();
+
+    for (const tag of tags) {
+      const rel = getHtmlTagAttribute(tag, "rel").toLowerCase();
+      const href = getHtmlTagAttribute(tag, "href");
+
+      if (!rel || !href) {
+        continue;
+      }
+
+      if (rel === normalizedRel || rel.includes(normalizedRel)) {
+        return href;
+      }
+    }
+  }
+
+  return "";
+}
+
+function buildCompanyWebsiteFaviconUrl(url) {
+  const normalizedUrl = normalizeCompanyWebsite(url);
+  if (!normalizedUrl) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    return `https://www.google.com/s2/favicons?sz=128&domain_url=${encodeURIComponent(
+      parsedUrl.origin
+    )}`;
+  } catch {
+    return "";
+  }
+}
+
+function isUsefulCompanyWebsiteDescription(description, companyName = "", symbol = "") {
+  const normalizedDescription = normalizeWhitespace(stripHtml(description));
+  if (normalizedDescription.length < 24) {
+    return false;
+  }
+
+  const lowerDescription = normalizedDescription.toLowerCase();
+  const blockedPhrases = [
+    "coming soon",
+    "under construction",
+    "enable javascript",
+    "javascript is disabled",
+    "skip to content",
+    "page not found",
+    "403 forbidden",
+    "404 not found",
+  ];
+
+  if (blockedPhrases.some((phrase) => lowerDescription.includes(phrase))) {
+    return false;
+  }
+
+  const searchableTerms = [companyName, symbol]
+    .map((value) => normalizeMatchPhrase(value))
+    .filter(Boolean);
+
+  if (
+    searchableTerms.length > 0 &&
+    searchableTerms.some((term) => normalizeMatchPhrase(normalizedDescription).includes(term))
+  ) {
+    return true;
+  }
+
+  return normalizedDescription.length >= 48;
+}
+
+function extractCompanyWebsiteDescription(html, companyName = "", symbol = "") {
+  const candidates = [
+    extractMetaTagContent(html, "property", "og:description"),
+    extractMetaTagContent(html, "name", "description"),
+    extractMetaTagContent(html, "name", "twitter:description"),
+  ];
+
+  return (
+    candidates.find((candidate) =>
+      isUsefulCompanyWebsiteDescription(candidate, companyName, symbol)
+    ) || ""
+  );
+}
+
+function extractCompanyWebsiteLogoUrl(html, website) {
+  const baseUrl = normalizeCompanyWebsite(website);
+  if (!baseUrl) {
+    return "";
+  }
+
+  const metaCandidates = [
+    extractMetaTagContent(html, "property", "og:image"),
+    extractMetaTagContent(html, "name", "og:image"),
+    extractMetaTagContent(html, "name", "twitter:image"),
+  ];
+
+  for (const candidate of metaCandidates) {
+    if (candidate) {
+      return toAbsoluteUrl(candidate, baseUrl);
+    }
+  }
+
+  const iconHref = extractLinkHrefByRel(html, [
+    "apple-touch-icon",
+    "apple-touch-icon-precomposed",
+    "shortcut icon",
+    "icon",
+    "mask-icon",
+  ]);
+
+  if (iconHref) {
+    return toAbsoluteUrl(iconHref, baseUrl);
+  }
+
+  return buildCompanyWebsiteFaviconUrl(baseUrl);
+}
+
+async function resolveCompanyWebsiteBranding(symbol, options = {}) {
+  const upperSymbol = String(symbol || "").toUpperCase().trim();
+  const companyOverride = STOCK_COMPANY_OVERRIDES[upperSymbol] || null;
+  const normalizedWebsite = normalizeCompanyWebsite(
+    options.website || companyOverride?.website || ""
+  );
+  const fallbackLogoUrl =
+    normalizeWhitespace(companyOverride?.logoUrl) ||
+    buildCompanyWebsiteFaviconUrl(normalizedWebsite);
+  const fallbackPayload = {
+    companyName:
+      normalizeWhitespace(companyOverride?.companyName) ||
+      normalizeWhitespace(options.companyName) ||
+      SYMBOL_NAME_MAP[upperSymbol] ||
+      upperSymbol,
+    website: normalizedWebsite,
+    logoUrl: fallbackLogoUrl,
+    description: "",
+    source: fallbackLogoUrl ? "company-website-favicon" : "fallback",
+  };
+
+  if (!normalizedWebsite) {
+    return fallbackPayload;
+  }
+
+  const cached = getCompanyWebsiteBrandingCacheEntry(normalizedWebsite);
+  if (cached) {
+    return {
+      ...cached,
+      companyName: cached.companyName || fallbackPayload.companyName,
+      website: cached.website || normalizedWebsite,
+      logoUrl: cached.logoUrl || fallbackLogoUrl,
+    };
+  }
+
+  const cacheKey = getCompanyWebsiteBrandingCacheKey(normalizedWebsite);
+  if (companyWebsiteBrandingPending.has(cacheKey)) {
+    return companyWebsiteBrandingPending.get(cacheKey);
+  }
+
+  const pending = (async () => {
+    try {
+      const html = await fetchTextWithTimeout(
+        normalizedWebsite,
+        COMPANY_WEBSITE_TIMEOUT_MS
+      );
+      const payload = {
+        companyName: fallbackPayload.companyName,
+        website: normalizedWebsite,
+        logoUrl:
+          normalizeWhitespace(companyOverride?.logoUrl) ||
+          extractCompanyWebsiteLogoUrl(html, normalizedWebsite) ||
+          fallbackLogoUrl,
+        description: extractCompanyWebsiteDescription(
+          html,
+          fallbackPayload.companyName,
+          upperSymbol
+        ),
+        source: "company-website",
+      };
+      setCompanyWebsiteBrandingCacheEntry(normalizedWebsite, payload);
+      return payload;
+    } catch {
+      setCompanyWebsiteBrandingCacheEntry(
+        normalizedWebsite,
+        fallbackPayload,
+        60 * 60 * 1000
+      );
+      return fallbackPayload;
+    }
+  })();
+
+  companyWebsiteBrandingPending.set(cacheKey, pending);
+
+  try {
+    return await pending;
+  } finally {
+    companyWebsiteBrandingPending.delete(cacheKey);
+  }
+}
+
+function buildStockCompanyMetadata(stock, company = {}) {
+  const upperSymbol = String(
+    stock?.symbol || stock?.ticker || stock?.code || ""
+  )
+    .toUpperCase()
+    .trim();
+  const companyOverride = STOCK_COMPANY_OVERRIDES[upperSymbol] || null;
+  const companyName =
+    normalizeWhitespace(companyOverride?.companyName) ||
+    normalizeWhitespace(company.name) ||
+    normalizeWhitespace(stock?.companyName) ||
+    normalizeWhitespace(stock?.name) ||
+    SYMBOL_NAME_MAP[upperSymbol] ||
+    upperSymbol;
+  const website = normalizeCompanyWebsite(
+    companyOverride?.website || company.website || stock?.website || ""
+  );
+
+  return {
+    companyName,
+    sector: normalizeWhitespace(
+      companyOverride?.sector || company.sector || stock?.sector || ""
+    ),
+    industry: normalizeWhitespace(
+      companyOverride?.industry || company.industry || stock?.industry || ""
+    ),
+    website,
+    logoUrl:
+      normalizeWhitespace(companyOverride?.logoUrl) ||
+      buildCompanyWebsiteFaviconUrl(website),
+  };
+}
+
+function enrichStockWithCachedCompanyMetadata(stock) {
+  const upperSymbol = String(
+    stock?.symbol || stock?.ticker || stock?.code || ""
+  )
+    .toUpperCase()
+    .trim();
+
+  if (!upperSymbol) {
+    return stock;
+  }
+
+  const equityData =
+    getKwayisiCachedValue(`/equities/${encodeURIComponent(upperSymbol)}`) ||
+    getKwayisiCachedValue(`/equities/${encodeURIComponent(upperSymbol)}`, {
+      allowExpired: true,
+    }) ||
+    null;
+  const company = equityData?.company || {};
+  const metadata = buildStockCompanyMetadata(stock, company);
+
+  return {
+    ...stock,
+    name: metadata.companyName || stock.name,
+    companyName: metadata.companyName || stock.companyName || stock.name,
+    sector: metadata.sector || stock.sector || "",
+    industry: metadata.industry || stock.industry || "",
+    website: metadata.website || stock.website || "",
+    logoUrl: metadata.logoUrl || stock.logoUrl || "",
+  };
 }
 
 function toNullableNumber(value) {
@@ -2471,11 +2963,27 @@ function getLocalStockFallback(symbol) {
   };
 }
 
+function getFallbackStockSnapshotBySymbol(symbol) {
+  const upperSymbol = String(symbol || "").toUpperCase().trim();
+  if (!upperSymbol) {
+    return null;
+  }
+
+  return (
+    getBestAvailableStocksFallback().find(
+      (item) =>
+        String(item?.symbol || item?.ticker || item?.code || "")
+          .toUpperCase()
+          .trim() === upperSymbol
+    ) || null
+  );
+}
+
 function appendLiveSnapshotToHistoryRows(symbol, rows) {
   const upperSymbol = String(symbol || "").toUpperCase().trim();
   const safeRows = Array.isArray(rows) ? rows.slice() : [];
 
-  if (!upperSymbol || safeRows.length === 0) {
+  if (!upperSymbol) {
     return safeRows;
   }
 
@@ -2565,6 +3073,34 @@ function getLocalStocksFallback() {
   });
 }
 
+function getBundledLiveStocksFallback() {
+  if (!Array.isArray(BUNDLED_LIVE_STOCKS_SNAPSHOT)) {
+    return [];
+  }
+
+  return BUNDLED_LIVE_STOCKS_SNAPSHOT.map((item) =>
+    enrichStockWithCachedCompanyMetadata(mapStock(item))
+  );
+}
+
+function hasPositiveStockSnapshot(items) {
+  return Array.isArray(items) && items.some((item) => Number(item?.price) > 0);
+}
+
+function getBestAvailableStocksFallback() {
+  const bundledFallback = getBundledLiveStocksFallback();
+  if (hasPositiveStockSnapshot(bundledFallback)) {
+    return bundledFallback;
+  }
+
+  const localFallback = getLocalStocksFallback();
+  if (hasPositiveStockSnapshot(localFallback)) {
+    return localFallback;
+  }
+
+  return localFallback;
+}
+
 function getStockDetailCacheEntry(symbol) {
   const key = String(symbol || "").toUpperCase().trim();
   if (!key) {
@@ -2619,6 +3155,68 @@ function chunkValues(values, size) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function requestJsonWithTimeout(url, options = {}) {
+  const {
+    timeoutMs = KWAYISI_DEFAULT_TIMEOUT_MS,
+    headers = {},
+  } = options;
+
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const transport = parsedUrl.protocol === "https:" ? https : http;
+    const request = transport.request(
+      parsedUrl,
+      {
+        method: "GET",
+        family: 4,
+        headers: {
+          Accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
+          "Accept-Encoding": "identity",
+          ...headers,
+        },
+      },
+      (response) => {
+        let body = "";
+
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          resolve({
+            statusCode: Number(response.statusCode) || 0,
+            body,
+          });
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
+      request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    request.end();
+  });
+}
+
+function isAbortLikeErrorMessage(value) {
+  const message = String(value || "").toLowerCase();
+  return (
+    message.includes("aborted") ||
+    message.includes("aborterror") ||
+    message.includes("timeout") ||
+    message.includes("timed out")
+  );
 }
 
 function buildCompanyDescription(symbol, company = {}) {
@@ -2692,16 +3290,16 @@ async function fetchKwayisiJson(resource, options = {}) {
   }
 
   const requestPromise = (async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
     try {
-      const response = await fetch(`${KWAYISI_API_BASE}${normalizedResource}`, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-        signal: controller.signal,
-      });
+      const response = await requestJsonWithTimeout(
+        `${KWAYISI_API_BASE}${normalizedResource}`,
+        {
+          timeoutMs,
+          headers: KWAYISI_REQUEST_HEADERS,
+        }
+      );
 
-      if (allowNotFound && response.status === 404) {
+      if (allowNotFound && response.statusCode === 404) {
         setKwayisiCachedValue(
           normalizedResource,
           null,
@@ -2714,17 +3312,28 @@ async function fetchKwayisiJson(resource, options = {}) {
         return null;
       }
 
-      if (!response.ok) {
-        if (response.status === 429) {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        if (response.statusCode === 429) {
           kwayisiRateLimitState.until =
             Date.now() + KWAYISI_RATE_LIMIT_COOLDOWN_MS;
           kwayisiRateLimitState.reason = `${normalizedResource}:429`;
         }
 
-        throw new Error(`Kwayisi ${normalizedResource} failed: ${response.status}`);
+        throw new Error(`Kwayisi ${normalizedResource} failed: ${response.statusCode}`);
       }
 
-      const data = await response.json();
+      let data;
+
+      try {
+        data = JSON.parse(response.body);
+      } catch (parseError) {
+        throw new Error(
+          `Kwayisi ${normalizedResource} returned invalid JSON: ${
+            parseError?.message || parseError
+          }`
+        );
+      }
+
       setKwayisiCachedValue(
         normalizedResource,
         data,
@@ -2751,13 +3360,64 @@ async function fetchKwayisiJson(resource, options = {}) {
 
       throw error;
     } finally {
-      clearTimeout(timeoutId);
       kwayisiResourcePending.delete(resourceKey);
     }
   })();
 
   kwayisiResourcePending.set(resourceKey, requestPromise);
   return requestPromise;
+}
+
+function requestTextWithTimeout(url, options = {}) {
+  const {
+    timeoutMs = KWAYISI_DEFAULT_TIMEOUT_MS,
+    headers = {},
+  } = options;
+
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const transport = parsedUrl.protocol === "https:" ? https : http;
+    const request = transport.request(
+      parsedUrl,
+      {
+        method: "GET",
+        family: 4,
+        headers: {
+          Accept: "text/html,application/javascript,text/plain;q=0.9,*/*;q=0.8",
+          "Accept-Encoding": "identity",
+          ...headers,
+        },
+      },
+      (response) => {
+        let body = "";
+
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          resolve({
+            statusCode: Number(response.statusCode) || 0,
+            body,
+          });
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
+      request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    request.end();
+  });
 }
 
 function insertHistory(row) {
@@ -2809,10 +3469,27 @@ function filterRowsByRange(rows, range = "1W") {
   const cutoff = startDate.toISOString().split("T")[0];
   const filteredRows = rows.filter((row) => row.date >= cutoff);
 
+  const rangeTrailingPointCount = {
+    "1W": 5,
+    "1M": 22,
+    "3M": 66,
+    "6M": 132,
+    "YTD": 260,
+    "1Y": 260,
+    "5Y": rows.length,
+    "ALL": rows.length,
+  };
+  const trailingPointCount =
+    rangeTrailingPointCount[String(range || "1W").toUpperCase()] || 5;
+
   // Ghana market data can lag a few calendar days, so keep 1W anchored to
   // roughly one trading week instead of collapsing to a single point.
   if (range === "1W" && filteredRows.length < 5 && rows.length >= 2) {
     return rows.slice(-Math.min(rows.length, 5));
+  }
+
+  if (filteredRows.length < 2 && rows.length >= 2) {
+    return rows.slice(-Math.min(rows.length, trailingPointCount));
   }
 
   return filteredRows;
@@ -2984,6 +3661,105 @@ function parseGseIndexPageSummaries(pageText) {
   return summaries;
 }
 
+function buildSyntheticIndexHistoryRows(summary) {
+  const latestValue = Number(summary?.value);
+  if (!(latestValue > 0)) {
+    return [];
+  }
+
+  const latestDateRaw = String(summary?.lastDate || "").trim();
+  const latestDate =
+    /^\d{4}-\d{2}-\d{2}$/.test(latestDateRaw)
+      ? latestDateRaw
+      : new Date().toISOString().slice(0, 10);
+  const previousValueCandidate = latestValue - Number(summary?.change ?? 0);
+  const previousValue =
+    Number.isFinite(previousValueCandidate) && previousValueCandidate > 0
+      ? previousValueCandidate
+      : latestValue;
+  const previousDate = new Date(`${latestDate}T00:00:00Z`);
+
+  if (Number.isNaN(previousDate.getTime())) {
+    previousDate.setTime(Date.now());
+  }
+
+  previousDate.setUTCDate(previousDate.getUTCDate() - 1);
+
+  return [
+    {
+      date: previousDate.toISOString().slice(0, 10),
+      value: previousValue,
+      change: 0,
+      changePercent: 0,
+      volume: 0,
+      source: "Fallback",
+    },
+    {
+      date: latestDate,
+      value: latestValue,
+      change: Number(summary?.change ?? 0),
+      changePercent: Number(summary?.changePercent ?? 0),
+      volume: 0,
+      source: "Fallback",
+    },
+  ];
+}
+
+function getBundledGseIndicesFallback() {
+  const rawSummaries = Array.isArray(BUNDLED_GSE_INDICES_SNAPSHOT?.summaries)
+    ? BUNDLED_GSE_INDICES_SNAPSHOT.summaries
+    : [];
+
+  if (rawSummaries.length === 0) {
+    return null;
+  }
+
+  const summaries = rawSummaries
+    .map((summary) => ({
+      code: normalizeGseIndexCode(summary?.code),
+      name: String(summary?.name || ""),
+      value: Number(summary?.value ?? 0),
+      change: Number(summary?.change ?? 0),
+      changePercent: Number(summary?.changePercent ?? 0),
+      ytdChange: Number(summary?.ytdChange ?? 0),
+      ytdChangePercent: Number(summary?.ytdChangePercent ?? 0),
+      lastDate: String(summary?.lastDate || ""),
+    }))
+    .filter((summary) => summary.code && Number.isFinite(summary.value) && summary.value > 0);
+
+  if (summaries.length === 0) {
+    return null;
+  }
+
+  const historyByCode = {};
+
+  for (const summary of summaries) {
+    const rawRows = Array.isArray(BUNDLED_GSE_INDICES_SNAPSHOT?.historyByCode?.[summary.code])
+      ? BUNDLED_GSE_INDICES_SNAPSHOT.historyByCode[summary.code]
+      : [];
+    const normalizedRows = rawRows
+      .map((row) => ({
+        date: String(row?.date || ""),
+        value: Number(row?.value ?? 0),
+        change: Number(row?.change ?? 0),
+        changePercent: Number(row?.changePercent ?? 0),
+        volume: Number(row?.volume ?? 0),
+        source: String(row?.source || "KwayisiChart"),
+      }))
+      .filter((row) => row.date && Number.isFinite(row.value) && row.value > 0);
+
+    historyByCode[summary.code] =
+      normalizedRows.length > 0
+        ? normalizedRows
+        : buildSyntheticIndexHistoryRows(summary);
+  }
+
+  return {
+    summaries,
+    historyByCode,
+  };
+}
+
 function getRangeCutoffKey(range = "1W") {
   const now = new Date();
   let startDate = null;
@@ -3146,14 +3922,28 @@ function buildFallbackHistoryRows(symbol, range = "1W") {
             .trim() === upperSymbol
       )
     : null;
+  const snapshotFallback = getFallbackStockSnapshotBySymbol(upperSymbol);
   const localFallback = getLocalStockFallback(upperSymbol);
   const price = toFiniteNumber(
     cachedLive?.price,
-    toFiniteNumber(listLive?.price, toFiniteNumber(localFallback?.price, 0))
+    toFiniteNumber(
+      listLive?.price,
+      toFiniteNumber(snapshotFallback?.price, toFiniteNumber(localFallback?.price, 0))
+    )
   );
   const change = toFiniteNumber(
     cachedLive?.change,
-    toFiniteNumber(listLive?.change, toFiniteNumber(localFallback?.change, 0))
+    toFiniteNumber(
+      listLive?.change,
+      toFiniteNumber(snapshotFallback?.change, toFiniteNumber(localFallback?.change, 0))
+    )
+  );
+  const volume = toFiniteNumber(
+    cachedLive?.volume,
+    toFiniteNumber(
+      listLive?.volume,
+      toFiniteNumber(snapshotFallback?.volume, toFiniteNumber(localFallback?.volume, 0))
+    )
   );
 
   if (!(price > 0)) {
@@ -3197,7 +3987,7 @@ function buildFallbackHistoryRows(symbol, range = "1W") {
       value: previousClose,
       change: 0,
       changePercent: 0,
-      volume: 0,
+      volume,
       source: "Fallback",
     },
     {
@@ -3205,10 +3995,7 @@ function buildFallbackHistoryRows(symbol, range = "1W") {
       value: price,
       change,
       changePercent: deriveChangePercent(price, change),
-      volume: toFiniteNumber(
-        cachedLive?.volume,
-        toFiniteNumber(listLive?.volume, toFiniteNumber(localFallback?.volume, 0))
-      ),
+      volume,
       source: "Fallback",
     },
   ];
@@ -3219,57 +4006,16 @@ async function scrapeKwayisiChartData(symbol, range = "ALL") {
   const url = `${KWAYISI_CHART_API_BASE}/${encodeURIComponent(
     normalizedSymbol.toLowerCase()
   )}`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), KWAYISI_CHART_TIMEOUT_MS);
-  let scriptText = "";
-  let fetchError = null;
+  const response = await requestTextWithTimeout(url, {
+    timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+    headers: KWAYISI_REQUEST_HEADERS,
+  });
 
-  try {
-    const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Kwayisi chart ${normalizedSymbol} failed: ${response.status}`);
-    }
-
-    scriptText = await response.text();
-  } catch (error) {
-    fetchError = error;
-  } finally {
-    clearTimeout(timeoutId);
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`Kwayisi chart ${normalizedSymbol} failed: ${response.statusCode}`);
   }
 
-  if (!scriptText) {
-    try {
-      const curlTimeoutSeconds = Math.max(
-        4,
-        Math.ceil(KWAYISI_CHART_TIMEOUT_MS / 1000)
-      );
-      const { stdout } = await execFileAsync(
-        "curl",
-        [
-          "-sS",
-          "--max-time",
-          String(curlTimeoutSeconds),
-          "-A",
-          "Mozilla/5.0",
-          url,
-        ],
-        {
-          maxBuffer: 6 * 1024 * 1024,
-        }
-      );
-      scriptText = String(stdout || "");
-    } catch (curlError) {
-      throw new Error(
-        `Kwayisi chart ${normalizedSymbol} fetch failed: ${
-          fetchError?.message || fetchError || ""
-        } | curl fallback failed: ${curlError?.message || curlError}`
-      );
-    }
-  }
+  const scriptText = String(response.body || "");
 
   const pointPattern =
     /\[d\("(\d{4}-\d{2}-\d{2})"\),\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\]/g;
@@ -3359,122 +4105,45 @@ async function refreshGseIndicesCache() {
 
   gseIndexCache.pending = (async () => {
     const chartFetchPromise = (async () => {
-      let scriptText = "";
-      let fetchError = null;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(
-        () => controller.abort(),
-        KWAYISI_CHART_TIMEOUT_MS
-      );
+      const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
+        timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+        headers: KWAYISI_REQUEST_HEADERS,
+      });
 
-      try {
-        const response = await fetch(KWAYISI_CHART_API_BASE, {
-          headers: { "User-Agent": "Mozilla/5.0" },
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`Kwayisi indices failed: ${response.status}`);
-        }
-
-        scriptText = await response.text();
-      } catch (error) {
-        fetchError = error;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-
-      if (!scriptText) {
-        const curlTimeoutSeconds = Math.max(
-          4,
-          Math.ceil(KWAYISI_CHART_TIMEOUT_MS / 1000)
-        );
-        const { stdout } = await execFileAsync(
-          "curl",
-          [
-            "-sS",
-            "--max-time",
-            String(curlTimeoutSeconds),
-            "-A",
-            "Mozilla/5.0",
-            KWAYISI_CHART_API_BASE,
-          ],
-          {
-            maxBuffer: 8 * 1024 * 1024,
-          }
-        );
-        scriptText = String(stdout || "");
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
       }
 
       return {
-        scriptText,
-        fetchError,
+        scriptText: String(response.body || ""),
       };
     })();
 
     const pageFetchPromise = (async () => {
-      let pageText = "";
-      let pageFetchError = null;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(
-        () => controller.abort(),
-        KWAYISI_DEFAULT_TIMEOUT_MS
-      );
-
       try {
-        const response = await fetch(KWAYISI_GSE_PAGE_URL, {
-          headers: { "User-Agent": "Mozilla/5.0" },
-          signal: controller.signal,
+        const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
+          timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+          headers: KWAYISI_REQUEST_HEADERS,
         });
 
-        if (!response.ok) {
-          throw new Error(`Kwayisi GSE page failed: ${response.status}`);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
         }
 
-        pageText = await response.text();
+        return {
+          pageText: String(response.body || ""),
+        };
       } catch (error) {
-        pageFetchError = error;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-
-      if (!pageText) {
-        try {
-          const curlTimeoutSeconds = Math.max(
-            4,
-            Math.ceil(KWAYISI_DEFAULT_TIMEOUT_MS / 1000)
-          );
-          const { stdout } = await execFileAsync(
-            "curl",
-            [
-              "-sS",
-              "--max-time",
-              String(curlTimeoutSeconds),
-              "-A",
-              "Mozilla/5.0",
-              KWAYISI_GSE_PAGE_URL,
-            ],
-            {
-              maxBuffer: 8 * 1024 * 1024,
-            }
-          );
-          pageText = String(stdout || "");
-        } catch (curlError) {
-          console.error(
-            "Kwayisi GSE page fallback failed:",
-            pageFetchError?.message || pageFetchError || curlError?.message || curlError
-          );
-        }
+        console.error("Kwayisi GSE page fallback failed:", error?.message || error);
       }
 
       return {
-        pageText,
-        pageFetchError,
+        pageText: "",
       };
     })();
 
     const [
-      { scriptText, fetchError },
+      { scriptText },
       { pageText },
     ] = await Promise.all([chartFetchPromise, pageFetchPromise]);
 
@@ -3487,7 +4156,7 @@ async function refreshGseIndicesCache() {
       }
 
       throw new Error(
-        `Kwayisi indices fetch failed: ${fetchError?.message || fetchError || "unknown"}`
+        "Kwayisi indices fetch failed: empty chart response"
       );
     }
 
@@ -3695,6 +4364,14 @@ async function fetchHistoryRowsWithCache(symbol, range, options = {}) {
 function buildStockDetailPayload(symbol, liveData, equityData) {
   const upperSymbol = String(symbol || "").toUpperCase().trim();
   const company = equityData?.company || {};
+  const companyMetadata = buildStockCompanyMetadata(
+    {
+      ...liveData,
+      ...equityData,
+      symbol: upperSymbol,
+    },
+    company
+  );
   const mappedStock = mapStock({
     ...equityData,
     ...liveData,
@@ -3707,7 +4384,11 @@ function buildStockDetailPayload(symbol, liveData, equityData) {
 
   return {
     ...mappedStock,
-    companyName: company.name || SYMBOL_NAME_MAP[upperSymbol] || upperSymbol,
+    companyName: companyMetadata.companyName,
+    sector: companyMetadata.sector,
+    industry: companyMetadata.industry,
+    website: companyMetadata.website,
+    logoUrl: companyMetadata.logoUrl,
     capital,
     dps,
     eps: toNullableNumber(equityData?.eps),
@@ -3724,7 +4405,8 @@ function buildStockDetailPayload(symbol, liveData, equityData) {
       industry: company.industry || "",
       sector: company.sector || "",
       telephone: company.telephone || "",
-      website: normalizeCompanyWebsite(company.website || ""),
+      website: companyMetadata.website,
+      logoUrl: companyMetadata.logoUrl,
     },
   };
 }
@@ -3744,7 +4426,7 @@ async function refreshLiveStocksCache() {
         throw new Error("Live stocks response is not an array");
       }
 
-      const mapped = data.map(mapStock);
+      const mapped = data.map((item) => enrichStockWithCachedCompanyMetadata(mapStock(item)));
       liveStocksCache.items = mapped;
       liveStocksCache.fetchedAt = Date.now();
       liveStocksCache.rateLimitedUntil = 0;
@@ -3759,6 +4441,36 @@ async function refreshLiveStocksCache() {
 
       console.error("getLiveStocks fallback triggered:", message);
 
+      const shouldRetryAbortedLiveFetch =
+        liveStocksCache.items.length === 0 && isAbortLikeErrorMessage(message);
+
+      if (shouldRetryAbortedLiveFetch) {
+        try {
+          await sleep(250);
+          const retriedData = await fetchKwayisiJson("/live", {
+            cacheTtlMs: LIVE_STOCKS_CACHE_TTL_MS,
+            timeoutMs: KWAYISI_RETRY_TIMEOUT_MS,
+            useStaleOnError: false,
+            bypassCache: true,
+          });
+
+          if (Array.isArray(retriedData) && retriedData.length > 0) {
+            const mappedRetry = retriedData.map((item) =>
+              enrichStockWithCachedCompanyMetadata(mapStock(item))
+            );
+            liveStocksCache.items = mappedRetry;
+            liveStocksCache.fetchedAt = Date.now();
+            liveStocksCache.rateLimitedUntil = 0;
+            return mappedRetry;
+          }
+        } catch (retryError) {
+          console.error(
+            "getLiveStocks retry failed:",
+            retryError?.message || retryError
+          );
+        }
+      }
+
       if (liveStocksCache.items.length > 0) {
         return liveStocksCache.items;
       }
@@ -3771,7 +4483,17 @@ async function refreshLiveStocksCache() {
           });
 
           if (Array.isArray(equitiesSnapshot) && equitiesSnapshot.length > 0) {
-            const mappedSnapshot = equitiesSnapshot.map(mapStock);
+            const mappedSnapshot = equitiesSnapshot.map((item) =>
+              enrichStockWithCachedCompanyMetadata(
+                mapStock({
+                  ...item,
+                  company: item?.company?.name || item?.company || item?.name,
+                  sector: item?.company?.sector || "",
+                  industry: item?.company?.industry || "",
+                  website: item?.company?.website || "",
+                })
+              )
+            );
             liveStocksCache.items = mappedSnapshot;
             liveStocksCache.fetchedAt = Date.now();
             return mappedSnapshot;
@@ -3784,10 +4506,10 @@ async function refreshLiveStocksCache() {
         }
       }
 
-      const localFallback = getLocalStocksFallback();
-      liveStocksCache.items = localFallback;
+      const fallbackSnapshot = getBestAvailableStocksFallback();
+      liveStocksCache.items = fallbackSnapshot;
       liveStocksCache.fetchedAt = Date.now();
-      return localFallback;
+      return fallbackSnapshot;
     } finally {
       liveStocksCache.pending = null;
     }
@@ -3827,14 +4549,14 @@ async function getLiveStocks(options = {}) {
   }
 
   if (allowStale) {
-    const localFallback = getLocalStocksFallback();
-    const hasLocalSnapshot = localFallback.some((item) => Number(item.price) > 0);
+    const fallbackSnapshot = getBestAvailableStocksFallback();
+    const hasFallbackSnapshot = hasPositiveStockSnapshot(fallbackSnapshot);
 
-    if (hasLocalSnapshot) {
-      liveStocksCache.items = localFallback;
+    if (hasFallbackSnapshot) {
+      liveStocksCache.items = fallbackSnapshot;
       liveStocksCache.fetchedAt = Date.now();
       void refreshLiveStocksCache();
-      return localFallback;
+      return fallbackSnapshot;
     }
   }
 
@@ -4303,6 +5025,10 @@ app.get("/api/stocks/mini-history", async (req, res) => {
         }
       }
 
+      if (!Array.isArray(rows) || rows.length < 2) {
+        rows = buildFallbackHistoryRows(symbol, range);
+      }
+
       const values = Array.isArray(rows)
         ? rows
             .map((row) => Number(row?.value))
@@ -4345,11 +5071,40 @@ app.get("/api/stocks/:symbol/about", async (req, res) => {
     const about = await resolveStockAbout(symbol, {
       companyName: stock?.companyName || stock?.name || SYMBOL_NAME_MAP[symbol] || symbol,
       fallbackDescription: stock?.description || "",
+      website: stock?.company?.website || stock?.website || "",
     });
     res.json(about);
   } catch (error) {
     console.error("Stock about route failed:", error);
     res.status(500).json({ error: "Failed to fetch stock about" });
+  }
+});
+
+app.get("/api/stocks/:symbol/branding", async (req, res) => {
+  try {
+    const symbol = String(req.params.symbol || "").toUpperCase();
+    const stock = await getStockDetail(symbol);
+    const branding = await resolveCompanyWebsiteBranding(symbol, {
+      companyName: stock?.companyName || stock?.name || SYMBOL_NAME_MAP[symbol] || symbol,
+      website: stock?.company?.website || stock?.website || "",
+    });
+
+    res.json({
+      symbol,
+      companyName:
+        stock?.companyName ||
+        branding.companyName ||
+        stock?.name ||
+        SYMBOL_NAME_MAP[symbol] ||
+        symbol,
+      website: branding.website || stock?.company?.website || stock?.website || "",
+      logoUrl: branding.logoUrl || stock?.company?.logoUrl || stock?.logoUrl || "",
+      description: branding.description || "",
+      source: branding.source || "fallback",
+    });
+  } catch (error) {
+    console.error("Stock branding route failed:", error);
+    res.status(500).json({ error: "Failed to fetch stock branding" });
   }
 });
 
@@ -4482,6 +5237,11 @@ app.get("/api/stocks/:symbol/history", async (req, res) => {
       return res.json(dbRows);
     }
 
+    const generatedFallbackRows = buildFallbackHistoryRows(symbol, range);
+    if (generatedFallbackRows.length > 0) {
+      return res.json(generatedFallbackRows);
+    }
+
     return res.json([]);
   } catch (error) {
     console.error("History route failed:", error);
@@ -4608,6 +5368,10 @@ if (fs.existsSync(CLIENT_INDEX_PATH)) {
 }
 
 function warmCachesInBackground() {
+  if (IS_CLOUD_RUN) {
+    return;
+  }
+
   void getLiveStocks({ allowStale: false }).catch((error) => {
     console.error("Live stocks warmup failed:", error?.message || error);
   });
@@ -4637,5 +5401,10 @@ function warmCachesInBackground() {
 app.listen({ port: PORT, host: HOST, ipv6Only: false }, () => {
   const displayHost = HOST === "::" ? "localhost" : HOST;
   console.log(`Server running at http://${displayHost}:${PORT}`);
+  if (IS_CLOUD_RUN) {
+    console.log("Skipping startup warmups on Cloud Run.");
+    return;
+  }
+
   setTimeout(warmCachesInBackground, CACHE_WARMUP_DELAY_MS);
 });

@@ -44,12 +44,6 @@ export const MARKET_CATEGORY_DEFINITIONS: readonly MarketCategoryDefinition[] = 
     accent: "#7DD3FC",
   },
   {
-    key: "heatmap",
-    label: "Heatmap",
-    iconText: "HM",
-    accent: "#F59E0B",
-  },
-  {
     key: "gainers",
     label: "Gainers",
     iconText: "UP",
@@ -119,7 +113,6 @@ export const MARKET_CATEGORY_DEFINITIONS: readonly MarketCategoryDefinition[] = 
 
 const ALWAYS_VISIBLE_KEYS = new Set<MarketCategoryKey>([
   "all_equities",
-  "heatmap",
   "gainers",
   "losers",
 ]);
@@ -229,8 +222,6 @@ export function getPopularMarketLists(
     count:
       item.key === DEFAULT_MARKET_CATEGORY
         ? stocks.length
-        : item.key === "heatmap"
-          ? stocks.length
         : item.key === "gainers"
           ? stocks.filter((stock) => Number(stock.changePercent) > 0).length
           : item.key === "losers"

@@ -20,6 +20,10 @@ import AlertToastStack, {
 } from "./components/AlertToastStack";
 import { getApiBase } from "./lib/api";
 import {
+  getKwayisiLiveUrl,
+  shouldUseDirectKwayisiBrowserData,
+} from "./lib/kwayisi";
+import {
   markPriceAlertTriggered,
   readEnabledPriceAlerts,
 } from "./lib/priceAlerts";
@@ -39,6 +43,8 @@ export type Stock = {
   companyName?: string;
   sector?: string;
   industry?: string;
+  website?: string;
+  logoUrl?: string;
   price: number;
   change: number;
   changePercent: number;
@@ -113,6 +119,8 @@ function normalizeStock(stock: Stock): Stock {
     companyName: stock.companyName || stock.name,
     sector: stock.sector || "",
     industry: stock.industry || "",
+    website: stock.website || "",
+    logoUrl: stock.logoUrl || "",
     price: Number(stock.price ?? 0),
     change: Number(stock.change ?? 0),
     changePercent: Number(stock.changePercent ?? 0),
@@ -411,7 +419,10 @@ function App() {
 
     const fetchStocks = async () => {
       try {
-        const stocksRes = await fetch(`${apiBase}/api/stocks`);
+        const stocksUrl = shouldUseDirectKwayisiBrowserData()
+          ? getKwayisiLiveUrl()
+          : `${apiBase}/api/stocks`;
+        const stocksRes = await fetch(stocksUrl);
 
         if (!stocksRes.ok) {
           throw new Error("Failed to load stock data");

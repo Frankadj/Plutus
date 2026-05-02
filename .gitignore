@@ -1,4 +1,5 @@
 .bin/
+.firebase/
 .codex
 .vscode/
 node_modules/
