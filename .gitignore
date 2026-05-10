@@ -15,4 +15,5 @@ android-sdk/
 jdk-21/
 jdk21.tar.gz
 plutus.zip
+plutus-self-hosted-handoff-*
 *.log

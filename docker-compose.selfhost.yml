@@ -1,0 +1,20 @@
+services:
+  plutus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plutus-app
+    restart: unless-stopped
+    env_file:
+      - .env.selfhost
+    environment:
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-3001}
+      DB_DIR: ${DB_DIR:-/data}
+    ports:
+      - "${PORT:-3001}:3001"
+    volumes:
+      - plutus-data:${DB_DIR:-/data}
+
+volumes:
+  plutus-data:

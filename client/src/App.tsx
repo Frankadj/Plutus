@@ -24,6 +24,11 @@ import {
   shouldUseDirectKwayisiBrowserData,
 } from "./lib/kwayisi";
 import {
+  deriveStockChangePercent,
+  resolveStockDisplayName,
+  resolveStockSymbolFromIdentity,
+} from "./lib/stockMetadata";
+import {
   markPriceAlertTriggered,
   readEnabledPriceAlerts,
 } from "./lib/priceAlerts";
@@ -103,27 +108,33 @@ const ALERT_TOAST_DURATION_MS = 6500;
 const MAX_ALERT_TOASTS = 4;
 
 function resolveStockSymbol(stock: Partial<Stock>) {
-  return String(stock.symbol || stock.ticker || stock.code || "")
-    .toUpperCase()
-    .trim();
+  return resolveStockSymbolFromIdentity(stock);
 }
 
 function normalizeStock(stock: Stock): Stock {
   const resolvedSymbol = resolveStockSymbol(stock);
+  const price = Number(stock.price ?? 0);
+  const change = Number(stock.change ?? 0);
+  const displayName = resolveStockDisplayName(stock, resolvedSymbol);
+  const changePercent = deriveStockChangePercent(
+    price,
+    change,
+    stock.changePercent
+  );
 
   return {
     symbol: resolvedSymbol,
     ticker: stock.ticker || resolvedSymbol,
     code: stock.code || resolvedSymbol,
-    name: stock.name,
-    companyName: stock.companyName || stock.name,
+    name: displayName,
+    companyName: displayName,
     sector: stock.sector || "",
     industry: stock.industry || "",
     website: stock.website || "",
     logoUrl: stock.logoUrl || "",
-    price: Number(stock.price ?? 0),
-    change: Number(stock.change ?? 0),
-    changePercent: Number(stock.changePercent ?? 0),
+    price,
+    change,
+    changePercent,
     volume: Number(stock.volume ?? 0),
   };
 }
