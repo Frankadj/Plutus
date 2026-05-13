@@ -33,18 +33,8 @@ function ChartLoadingSkeleton({
       >
         <div
           style={{
-            width: "42%",
-            height: 10,
-            borderRadius: 999,
-            background: "rgba(142, 142, 147, 0.18)",
-          }}
-        />
-
-        <div
-          style={{
             position: "relative",
             flex: 1,
-            marginTop: 14,
             borderRadius: 14,
             overflow: "hidden",
           }}
