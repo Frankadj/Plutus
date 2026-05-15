@@ -105,6 +105,7 @@ const COMPANY_WEBSITE_TIMEOUT_MS = 4500;
 const HEATMAP_EQUITY_BATCH_SIZE = 6;
 const HISTORY_SCRAPE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const HISTORY_SCRAPE_ERROR_COOLDOWN_MS = 30 * 1000;
+const IS_RENDER = !!process.env.RENDER || (typeof process.env.HOSTNAME === 'string' && process.env.HOSTNAME.includes('render'));
 const HISTORY_COVERAGE_SYNC_TTL_MS = 12 * 60 * 60 * 1000;
 const RECENT_HISTORY_STALE_DAYS = 5;
 const WIKIPEDIA_TIMEOUT_MS = 1500;
@@ -3394,6 +3395,55 @@ async function fetchKwayisiJson(resource, options = {}) {
   return requestPromise;
 }
 
+async function fetchWithPlaywright(url, options = {}) {
+  const { timeoutMs = 45000 } = options;
+  const { chromium } = require("playwright");
+  let browser;
+  try {
+    console.log(`[Playwright] Starting scrape for ${url}`);
+    browser = await chromium.launch({ 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    const page = await browser.newPage({
+      userAgent: KWAYISI_REQUEST_HEADERS["User-Agent"]
+    });
+    
+    // Set a common viewport
+    await page.setViewportSize({ width: 1280, height: 720 });
+    
+    const response = await page.goto(url, { 
+      waitUntil: 'domcontentloaded', 
+      timeout: timeoutMs 
+    });
+    
+    if (!response) {
+      throw new Error(`No response from ${url}`);
+    }
+
+    const statusCode = response.status();
+    const body = await page.content();
+    
+    console.log(`[Playwright] Finished ${url} - Status: ${statusCode} - Length: ${body.length}`);
+    
+    return {
+      statusCode,
+      body
+    };
+  } catch (error) {
+    console.error(`[Playwright] Failed to fetch ${url}:`, error.message);
+    throw error;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error("[Playwright] Error closing browser:", closeError.message);
+      }
+    }
+  }
+}
+
 function requestTextWithTimeout(url, options = {}) {
   const {
     timeoutMs = KWAYISI_DEFAULT_TIMEOUT_MS,
@@ -4056,15 +4106,25 @@ async function scrapeKwayisiChartData(symbol, range = "ALL") {
   const url = `${KWAYISI_CHART_API_BASE}/${encodeURIComponent(
     normalizedSymbol.toLowerCase()
   )}`;
-  const response = await requestTextWithTimeout(url, {
-    timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-    headers: KWAYISI_REQUEST_HEADERS,
-  });
+  let response;
+  try {
+    response = await requestTextWithTimeout(url, {
+      timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+      headers: KWAYISI_REQUEST_HEADERS,
+    });
 
-  console.log(`[Scrape] ${url} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
+    console.log(`[Scrape] ${url} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
 
-  if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(`Kwayisi chart ${normalizedSymbol} failed: ${response.statusCode}`);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`Status ${response.statusCode}`);
+    }
+  } catch (error) {
+    console.warn(`[Scrape] http.request failed for ${url} (${error.message}), trying Playwright...`);
+    try {
+      response = await fetchWithPlaywright(url);
+    } catch (pwError) {
+      throw new Error(`Kwayisi chart ${normalizedSymbol} failed (both http and playwright): ${pwError.message}`);
+    }
   }
 
   const scriptText = String(response.body || "");
@@ -4158,12 +4218,8 @@ async function refreshGseIndicesCache() {
   gseIndexCache.pending = (async () => {
     const chartFetchPromise = (async () => {
       try {
-        const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
-          timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-          headers: KWAYISI_REQUEST_HEADERS,
-        });
-
-        console.log(`[Scrape] ${KWAYISI_CHART_API_BASE} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
+        // Use Playwright directly for indices as they are critical and prone to blocking
+        const response = await fetchWithPlaywright(KWAYISI_CHART_API_BASE);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
           throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
@@ -4180,12 +4236,7 @@ async function refreshGseIndicesCache() {
 
     const pageFetchPromise = (async () => {
       try {
-        const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
-          timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-          headers: KWAYISI_REQUEST_HEADERS,
-        });
-
-        console.log(`[Scrape] ${KWAYISI_GSE_PAGE_URL} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
+        const response = await fetchWithPlaywright(KWAYISI_GSE_PAGE_URL);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
           throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
@@ -5003,23 +5054,60 @@ app.get("/api/indices", async (req, res) => {
     res.json(data.summaries);
   } catch (error) {
     console.error("Indices route failed:", error);
+    const bundledFallback = getBundledGseIndicesFallback();
+    if (bundledFallback) {
+      console.log("Indices route: serving bundled fallback data");
+      return res.json(bundledFallback.summaries);
+    }
     res.status(500).json({ error: "Failed to fetch indices", message: error?.message });
+  }
+});
+
+app.get("/api/indices/:code/history", async (req, res) => {
+  try {
+    const code = normalizeGseIndexCode(req.params.code);
+    const requestedRange = String(req.query.range || "1W").toUpperCase();
+    const validRanges = new Set(["1W", "1M", "3M", "6M", "YTD", "1Y", "5Y", "ALL"]);
+    const range = validRanges.has(requestedRange) ? requestedRange : "1W";
+
+    if (!GSE_INDEX_CODES.includes(code)) {
+      return res.status(404).json({ error: "Index not found" });
+    }
+
+    const data = await getGseIndicesData();
+    const rows = data.historyByCode[code] || [];
+    return res.json(filterRowsByRange(rows, range));
+  } catch (error) {
+    console.error("Index history route failed:", error);
+    const code = normalizeGseIndexCode(req.params.code);
+    const requestedRange = String(req.query.range || "1W").toUpperCase();
+    const validRanges = new Set(["1W", "1M", "3M", "6M", "YTD", "1Y", "5Y", "ALL"]);
+    const range = validRanges.has(requestedRange) ? requestedRange : "1W";
+    const bundledFallback = getBundledGseIndicesFallback();
+    if (bundledFallback && bundledFallback.historyByCode[code]) {
+      console.log(`Index history route: serving bundled fallback for ${code}`);
+      return res.json(filterRowsByRange(bundledFallback.historyByCode[code], range));
+    }
+    return res.status(500).json({ error: "Failed to fetch index history" });
   }
 });
 
 app.get("/api/debug/scrape", async (req, res) => {
   const url = req.query.url;
+  const usePw = req.query.pw === 'true';
   if (!url) return res.status(400).send("No URL");
   try {
-    const response = await requestTextWithTimeout(url, {
-      headers: KWAYISI_REQUEST_HEADERS,
-      timeoutMs: 15000
-    });
+    const response = usePw 
+      ? await fetchWithPlaywright(url)
+      : await requestTextWithTimeout(url, {
+          headers: KWAYISI_REQUEST_HEADERS,
+          timeoutMs: 15000
+        });
     res.json({
       status: response.statusCode,
       bodyLength: response.body.length,
       bodyPreview: response.body.substring(0, 2000),
-      headers: KWAYISI_REQUEST_HEADERS
+      method: usePw ? 'playwright' : 'http'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5478,8 +5566,8 @@ function warmCachesInBackground() {
 app.listen({ port: PORT, host: HOST, ipv6Only: false }, () => {
   const displayHost = HOST === "::" ? "localhost" : HOST;
   console.log(`Server running at http://${displayHost}:${PORT}`);
-  if (IS_CLOUD_RUN) {
-    console.log("Skipping startup warmups on Cloud Run.");
+  if (IS_CLOUD_RUN || IS_RENDER) {
+    console.log("Skipping startup warmups on cloud environment.");
     return;
   }
 
