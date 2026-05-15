@@ -57,7 +57,7 @@ const KWAYISI_GSE_PAGE_URL = "https://afx.kwayisi.org/gse/";
 const KWAYISI_CHART_API_BASE = "https://afx.kwayisi.org/chart/gse";
 const WIKIPEDIA_API_BASE = "https://en.wikipedia.org";
 const GSE_PRESS_RELEASE_ARCHIVE_URL = "https://gse.com.gh/press-release/";
-const KWAYISI_CHART_TIMEOUT_MS = 7000;
+const KWAYISI_CHART_TIMEOUT_MS = 15000;
 const GSE_INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const NEWS_REQUEST_HEADERS = {
   "User-Agent":
@@ -91,10 +91,10 @@ const STOCK_NEWS_MAX_ITEMS = 6;
 const HOME_NEWS_MAX_ITEMS = 12;
 const LIVE_STOCKS_CACHE_TTL_MS = 20 * 1000;
 const LIVE_STOCKS_RATE_LIMIT_COOLDOWN_MS = 45 * 1000;
-const KWAYISI_DEFAULT_TIMEOUT_MS = 4500;
-const KWAYISI_RETRY_TIMEOUT_MS = 12000;
-const KWAYISI_RATE_LIMIT_COOLDOWN_MS = 90 * 1000;
-const KWAYISI_RESOURCE_ERROR_COOLDOWN_MS = 25 * 1000;
+const KWAYISI_DEFAULT_TIMEOUT_MS = 12000;
+const KWAYISI_RETRY_TIMEOUT_MS = 20000;
+const KWAYISI_RATE_LIMIT_COOLDOWN_MS = 30 * 1000;
+const KWAYISI_RESOURCE_ERROR_COOLDOWN_MS = 10 * 1000;
 const KWAYISI_PROFILE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const KWAYISI_NOT_FOUND_CACHE_TTL_MS = 60 * 1000;
 const STOCK_DETAIL_CACHE_TTL_MS = 20 * 1000;
@@ -102,7 +102,7 @@ const COMPANY_WEBSITE_BRANDING_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPANY_WEBSITE_TIMEOUT_MS = 4500;
 const HEATMAP_EQUITY_BATCH_SIZE = 6;
 const HISTORY_SCRAPE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const HISTORY_SCRAPE_ERROR_COOLDOWN_MS = 5 * 60 * 1000;
+const HISTORY_SCRAPE_ERROR_COOLDOWN_MS = 30 * 1000;
 const HISTORY_COVERAGE_SYNC_TTL_MS = 12 * 60 * 60 * 1000;
 const RECENT_HISTORY_STALE_DAYS = 5;
 const WIKIPEDIA_TIMEOUT_MS = 1500;
@@ -3161,51 +3161,76 @@ function requestJsonWithTimeout(url, options = {}) {
   const {
     timeoutMs = KWAYISI_DEFAULT_TIMEOUT_MS,
     headers = {},
+    maxRedirects = 5,
   } = options;
 
   return new Promise((resolve, reject) => {
-    let parsedUrl;
+    let redirectCount = 0;
 
-    try {
-      parsedUrl = new URL(url);
-    } catch (error) {
-      reject(error);
-      return;
+    function doRequest(targetUrl) {
+      let parsedUrl;
+
+      try {
+        parsedUrl = new URL(targetUrl);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+
+      const transport = parsedUrl.protocol === "https:" ? https : http;
+      const request = transport.request(
+        parsedUrl,
+        {
+          method: "GET",
+          family: 4,
+          headers: {
+            Accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "identity",
+            ...headers,
+          },
+        },
+        (response) => {
+          const statusCode = Number(response.statusCode) || 0;
+
+          if (
+            statusCode >= 300 &&
+            statusCode < 400 &&
+            response.headers.location &&
+            redirectCount < maxRedirects
+          ) {
+            redirectCount++;
+            const redirectUrl = new URL(
+              response.headers.location,
+              targetUrl
+            ).href;
+            response.resume();
+            doRequest(redirectUrl);
+            return;
+          }
+
+          let body = "";
+
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            resolve({
+              statusCode,
+              body,
+            });
+          });
+        }
+      );
+
+      request.on("error", reject);
+      request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
+        request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+      });
+      request.end();
     }
 
-    const transport = parsedUrl.protocol === "https:" ? https : http;
-    const request = transport.request(
-      parsedUrl,
-      {
-        method: "GET",
-        family: 4,
-        headers: {
-          Accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
-          "Accept-Encoding": "identity",
-          ...headers,
-        },
-      },
-      (response) => {
-        let body = "";
-
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
-          body += chunk;
-        });
-        response.on("end", () => {
-          resolve({
-            statusCode: Number(response.statusCode) || 0,
-            body,
-          });
-        });
-      }
-    );
-
-    request.on("error", reject);
-    request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
-      request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
-    });
-    request.end();
+    doRequest(url);
   });
 }
 
@@ -3372,51 +3397,76 @@ function requestTextWithTimeout(url, options = {}) {
   const {
     timeoutMs = KWAYISI_DEFAULT_TIMEOUT_MS,
     headers = {},
+    maxRedirects = 5,
   } = options;
 
   return new Promise((resolve, reject) => {
-    let parsedUrl;
+    let redirectCount = 0;
 
-    try {
-      parsedUrl = new URL(url);
-    } catch (error) {
-      reject(error);
-      return;
+    function doRequest(targetUrl) {
+      let parsedUrl;
+
+      try {
+        parsedUrl = new URL(targetUrl);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+
+      const transport = parsedUrl.protocol === "https:" ? https : http;
+      const request = transport.request(
+        parsedUrl,
+        {
+          method: "GET",
+          family: 4,
+          headers: {
+            Accept: "text/html,application/javascript,text/plain;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "identity",
+            ...headers,
+          },
+        },
+        (response) => {
+          const statusCode = Number(response.statusCode) || 0;
+
+          if (
+            statusCode >= 300 &&
+            statusCode < 400 &&
+            response.headers.location &&
+            redirectCount < maxRedirects
+          ) {
+            redirectCount++;
+            const redirectUrl = new URL(
+              response.headers.location,
+              targetUrl
+            ).href;
+            response.resume();
+            doRequest(redirectUrl);
+            return;
+          }
+
+          let body = "";
+
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            resolve({
+              statusCode,
+              body,
+            });
+          });
+        }
+      );
+
+      request.on("error", reject);
+      request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
+        request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+      });
+      request.end();
     }
 
-    const transport = parsedUrl.protocol === "https:" ? https : http;
-    const request = transport.request(
-      parsedUrl,
-      {
-        method: "GET",
-        family: 4,
-        headers: {
-          Accept: "text/html,application/javascript,text/plain;q=0.9,*/*;q=0.8",
-          "Accept-Encoding": "identity",
-          ...headers,
-        },
-      },
-      (response) => {
-        let body = "";
-
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
-          body += chunk;
-        });
-        response.on("end", () => {
-          resolve({
-            statusCode: Number(response.statusCode) || 0,
-            body,
-          });
-        });
-      }
-    );
-
-    request.on("error", reject);
-    request.setTimeout(Math.max(1000, Number(timeoutMs) || KWAYISI_DEFAULT_TIMEOUT_MS), () => {
-      request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
-    });
-    request.end();
+    doRequest(url);
   });
 }
 
@@ -4104,124 +4154,107 @@ async function refreshGseIndicesCache() {
   }
 
   gseIndexCache.pending = (async () => {
-    try {
-      const chartFetchPromise = (async () => {
-        const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
-          timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+    const chartFetchPromise = (async () => {
+      const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
+        timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+        headers: KWAYISI_REQUEST_HEADERS,
+      });
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
+      }
+
+      return {
+        scriptText: String(response.body || ""),
+      };
+    })();
+
+    const pageFetchPromise = (async () => {
+      try {
+        const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
+          timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
           headers: KWAYISI_REQUEST_HEADERS,
         });
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
+          throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
         }
 
         return {
-          scriptText: String(response.body || ""),
+          pageText: String(response.body || ""),
         };
-      })();
-
-      const pageFetchPromise = (async () => {
-        try {
-          const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
-            timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-            headers: KWAYISI_REQUEST_HEADERS,
-          });
-
-          if (response.statusCode < 200 || response.statusCode >= 300) {
-            throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
-          }
-
-          return {
-            pageText: String(response.body || ""),
-          };
-        } catch (error) {
-          console.error("Kwayisi GSE page fallback failed:", error?.message || error);
-        }
-
-        return {
-          pageText: "",
-        };
-      })();
-
-      const [
-        { scriptText },
-        { pageText },
-      ] = await Promise.all([chartFetchPromise, pageFetchPromise]);
-
-      if (!scriptText) {
-        if (gseIndexCache.summaries.length > 0) {
-          return {
-            summaries: gseIndexCache.summaries,
-            historyByCode: gseIndexCache.historyByCode,
-          };
-        }
-
-        throw new Error(
-          "Kwayisi indices fetch failed: empty chart response"
-        );
+      } catch (error) {
+        console.error("Kwayisi GSE page fallback failed:", error?.message || error);
       }
-
-      const historyByCode = parseGseIndexChartSeries(scriptText);
-      const pageSummaries = parseGseIndexPageSummaries(pageText);
-      const summaries = GSE_INDEX_CODES.map((code) => {
-        const historySummary =
-          Array.isArray(historyByCode[code]) && historyByCode[code].length > 0
-            ? buildGseIndexSummary(code, historyByCode[code])
-            : null;
-        const pageSummary = pageSummaries[code] || null;
-
-        return {
-          code,
-          name: GSE_INDEX_NAME_MAP[code] || code,
-          value: pageSummary?.value ?? historySummary?.value ?? 0,
-          change: pageSummary?.change ?? historySummary?.change ?? 0,
-          changePercent:
-            pageSummary?.changePercent ?? historySummary?.changePercent ?? 0,
-          ytdChange: pageSummary?.ytdChange ?? historySummary?.ytdChange ?? 0,
-          ytdChangePercent:
-            pageSummary?.ytdChangePercent ??
-            historySummary?.ytdChangePercent ??
-            0,
-          lastDate:
-            pageSummary?.lastDate || historySummary?.lastDate || "",
-        };
-      }).filter((item) => Number.isFinite(item.value) && item.value > 0);
-
-      if (summaries.length === 0) {
-        if (gseIndexCache.summaries.length > 0) {
-          return {
-            summaries: gseIndexCache.summaries,
-            historyByCode: gseIndexCache.historyByCode,
-          };
-        }
-
-        throw new Error("Kwayisi indices returned no usable rows");
-      }
-
-      gseIndexCache.summaries = summaries;
-      gseIndexCache.historyByCode = historyByCode;
-      gseIndexCache.fetchedAt = Date.now();
 
       return {
-        summaries,
-        historyByCode,
+        pageText: "",
       };
-    } catch (fetchError) {
-      console.error(
-        "refreshGseIndicesCache failed, using bundled fallback:",
-        fetchError?.message || fetchError
-      );
+    })();
 
-      const bundledFallback = getBundledGseIndicesFallback();
-      if (bundledFallback) {
-        gseIndexCache.summaries = bundledFallback.summaries;
-        gseIndexCache.historyByCode = bundledFallback.historyByCode;
-        gseIndexCache.fetchedAt = Date.now();
-        return bundledFallback;
+    const [
+      { scriptText },
+      { pageText },
+    ] = await Promise.all([chartFetchPromise, pageFetchPromise]);
+
+    if (!scriptText) {
+      if (gseIndexCache.summaries.length > 0) {
+        return {
+          summaries: gseIndexCache.summaries,
+          historyByCode: gseIndexCache.historyByCode,
+        };
       }
 
-      throw fetchError;
+      throw new Error(
+        "Kwayisi indices fetch failed: empty chart response"
+      );
     }
+
+    const historyByCode = parseGseIndexChartSeries(scriptText);
+    const pageSummaries = parseGseIndexPageSummaries(pageText);
+    const summaries = GSE_INDEX_CODES.map((code) => {
+      const historySummary =
+        Array.isArray(historyByCode[code]) && historyByCode[code].length > 0
+          ? buildGseIndexSummary(code, historyByCode[code])
+          : null;
+      const pageSummary = pageSummaries[code] || null;
+
+      return {
+        code,
+        name: GSE_INDEX_NAME_MAP[code] || code,
+        value: pageSummary?.value ?? historySummary?.value ?? 0,
+        change: pageSummary?.change ?? historySummary?.change ?? 0,
+        changePercent:
+          pageSummary?.changePercent ?? historySummary?.changePercent ?? 0,
+        ytdChange: pageSummary?.ytdChange ?? historySummary?.ytdChange ?? 0,
+        ytdChangePercent:
+          pageSummary?.ytdChangePercent ??
+          historySummary?.ytdChangePercent ??
+          0,
+        lastDate:
+          pageSummary?.lastDate || historySummary?.lastDate || "",
+      };
+    }).filter((item) => Number.isFinite(item.value) && item.value > 0);
+
+    if (summaries.length === 0) {
+      if (gseIndexCache.summaries.length > 0) {
+        return {
+          summaries: gseIndexCache.summaries,
+          historyByCode: gseIndexCache.historyByCode,
+        };
+      }
+
+      throw new Error("Kwayisi indices returned no usable rows");
+    }
+
+    gseIndexCache.summaries = summaries;
+    gseIndexCache.historyByCode = historyByCode;
+    gseIndexCache.fetchedAt = Date.now();
+
+    return {
+      summaries,
+      historyByCode,
+    };
   })();
 
   try {
@@ -4962,11 +4995,6 @@ app.get("/api/indices", async (req, res) => {
     res.json(data.summaries);
   } catch (error) {
     console.error("Indices route failed:", error);
-    const bundledFallback = getBundledGseIndicesFallback();
-    if (bundledFallback) {
-      console.log("Indices route: serving bundled fallback data");
-      return res.json(bundledFallback.summaries);
-    }
     res.status(500).json({ error: "Failed to fetch indices" });
   }
 });
@@ -4987,15 +5015,6 @@ app.get("/api/indices/:code/history", async (req, res) => {
     return res.json(filterRowsByRange(rows, range));
   } catch (error) {
     console.error("Index history route failed:", error);
-    const code = normalizeGseIndexCode(req.params.code);
-    const requestedRange = String(req.query.range || "1W").toUpperCase();
-    const validRanges = new Set(["1W", "1M", "3M", "6M", "YTD", "1Y", "5Y", "ALL"]);
-    const range = validRanges.has(requestedRange) ? requestedRange : "1W";
-    const bundledFallback = getBundledGseIndicesFallback();
-    if (bundledFallback && bundledFallback.historyByCode[code]) {
-      console.log(`Index history route: serving bundled fallback for ${code}`);
-      return res.json(filterRowsByRange(bundledFallback.historyByCode[code], range));
-    }
     return res.status(500).json({ error: "Failed to fetch index history" });
   }
 });
