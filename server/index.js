@@ -4104,107 +4104,124 @@ async function refreshGseIndicesCache() {
   }
 
   gseIndexCache.pending = (async () => {
-    const chartFetchPromise = (async () => {
-      const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
-        timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-        headers: KWAYISI_REQUEST_HEADERS,
-      });
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
-      }
-
-      return {
-        scriptText: String(response.body || ""),
-      };
-    })();
-
-    const pageFetchPromise = (async () => {
-      try {
-        const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
-          timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+    try {
+      const chartFetchPromise = (async () => {
+        const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
+          timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
           headers: KWAYISI_REQUEST_HEADERS,
         });
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
+          throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
         }
 
         return {
-          pageText: String(response.body || ""),
+          scriptText: String(response.body || ""),
         };
-      } catch (error) {
-        console.error("Kwayisi GSE page fallback failed:", error?.message || error);
+      })();
+
+      const pageFetchPromise = (async () => {
+        try {
+          const response = await requestTextWithTimeout(KWAYISI_GSE_PAGE_URL, {
+            timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+            headers: KWAYISI_REQUEST_HEADERS,
+          });
+
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
+          }
+
+          return {
+            pageText: String(response.body || ""),
+          };
+        } catch (error) {
+          console.error("Kwayisi GSE page fallback failed:", error?.message || error);
+        }
+
+        return {
+          pageText: "",
+        };
+      })();
+
+      const [
+        { scriptText },
+        { pageText },
+      ] = await Promise.all([chartFetchPromise, pageFetchPromise]);
+
+      if (!scriptText) {
+        if (gseIndexCache.summaries.length > 0) {
+          return {
+            summaries: gseIndexCache.summaries,
+            historyByCode: gseIndexCache.historyByCode,
+          };
+        }
+
+        throw new Error(
+          "Kwayisi indices fetch failed: empty chart response"
+        );
       }
+
+      const historyByCode = parseGseIndexChartSeries(scriptText);
+      const pageSummaries = parseGseIndexPageSummaries(pageText);
+      const summaries = GSE_INDEX_CODES.map((code) => {
+        const historySummary =
+          Array.isArray(historyByCode[code]) && historyByCode[code].length > 0
+            ? buildGseIndexSummary(code, historyByCode[code])
+            : null;
+        const pageSummary = pageSummaries[code] || null;
+
+        return {
+          code,
+          name: GSE_INDEX_NAME_MAP[code] || code,
+          value: pageSummary?.value ?? historySummary?.value ?? 0,
+          change: pageSummary?.change ?? historySummary?.change ?? 0,
+          changePercent:
+            pageSummary?.changePercent ?? historySummary?.changePercent ?? 0,
+          ytdChange: pageSummary?.ytdChange ?? historySummary?.ytdChange ?? 0,
+          ytdChangePercent:
+            pageSummary?.ytdChangePercent ??
+            historySummary?.ytdChangePercent ??
+            0,
+          lastDate:
+            pageSummary?.lastDate || historySummary?.lastDate || "",
+        };
+      }).filter((item) => Number.isFinite(item.value) && item.value > 0);
+
+      if (summaries.length === 0) {
+        if (gseIndexCache.summaries.length > 0) {
+          return {
+            summaries: gseIndexCache.summaries,
+            historyByCode: gseIndexCache.historyByCode,
+          };
+        }
+
+        throw new Error("Kwayisi indices returned no usable rows");
+      }
+
+      gseIndexCache.summaries = summaries;
+      gseIndexCache.historyByCode = historyByCode;
+      gseIndexCache.fetchedAt = Date.now();
 
       return {
-        pageText: "",
+        summaries,
+        historyByCode,
       };
-    })();
-
-    const [
-      { scriptText },
-      { pageText },
-    ] = await Promise.all([chartFetchPromise, pageFetchPromise]);
-
-    if (!scriptText) {
-      if (gseIndexCache.summaries.length > 0) {
-        return {
-          summaries: gseIndexCache.summaries,
-          historyByCode: gseIndexCache.historyByCode,
-        };
-      }
-
-      throw new Error(
-        "Kwayisi indices fetch failed: empty chart response"
+    } catch (fetchError) {
+      console.error(
+        "refreshGseIndicesCache failed, using bundled fallback:",
+        fetchError?.message || fetchError
       );
-    }
 
-    const historyByCode = parseGseIndexChartSeries(scriptText);
-    const pageSummaries = parseGseIndexPageSummaries(pageText);
-    const summaries = GSE_INDEX_CODES.map((code) => {
-      const historySummary =
-        Array.isArray(historyByCode[code]) && historyByCode[code].length > 0
-          ? buildGseIndexSummary(code, historyByCode[code])
-          : null;
-      const pageSummary = pageSummaries[code] || null;
-
-      return {
-        code,
-        name: GSE_INDEX_NAME_MAP[code] || code,
-        value: pageSummary?.value ?? historySummary?.value ?? 0,
-        change: pageSummary?.change ?? historySummary?.change ?? 0,
-        changePercent:
-          pageSummary?.changePercent ?? historySummary?.changePercent ?? 0,
-        ytdChange: pageSummary?.ytdChange ?? historySummary?.ytdChange ?? 0,
-        ytdChangePercent:
-          pageSummary?.ytdChangePercent ??
-          historySummary?.ytdChangePercent ??
-          0,
-        lastDate:
-          pageSummary?.lastDate || historySummary?.lastDate || "",
-      };
-    }).filter((item) => Number.isFinite(item.value) && item.value > 0);
-
-    if (summaries.length === 0) {
-      if (gseIndexCache.summaries.length > 0) {
-        return {
-          summaries: gseIndexCache.summaries,
-          historyByCode: gseIndexCache.historyByCode,
-        };
+      const bundledFallback = getBundledGseIndicesFallback();
+      if (bundledFallback) {
+        gseIndexCache.summaries = bundledFallback.summaries;
+        gseIndexCache.historyByCode = bundledFallback.historyByCode;
+        gseIndexCache.fetchedAt = Date.now();
+        return bundledFallback;
       }
 
-      throw new Error("Kwayisi indices returned no usable rows");
+      throw fetchError;
     }
-
-    gseIndexCache.summaries = summaries;
-    gseIndexCache.historyByCode = historyByCode;
-    gseIndexCache.fetchedAt = Date.now();
-
-    return {
-      summaries,
-      historyByCode,
-    };
   })();
 
   try {
@@ -4945,6 +4962,11 @@ app.get("/api/indices", async (req, res) => {
     res.json(data.summaries);
   } catch (error) {
     console.error("Indices route failed:", error);
+    const bundledFallback = getBundledGseIndicesFallback();
+    if (bundledFallback) {
+      console.log("Indices route: serving bundled fallback data");
+      return res.json(bundledFallback.summaries);
+    }
     res.status(500).json({ error: "Failed to fetch indices" });
   }
 });
@@ -4965,6 +4987,15 @@ app.get("/api/indices/:code/history", async (req, res) => {
     return res.json(filterRowsByRange(rows, range));
   } catch (error) {
     console.error("Index history route failed:", error);
+    const code = normalizeGseIndexCode(req.params.code);
+    const requestedRange = String(req.query.range || "1W").toUpperCase();
+    const validRanges = new Set(["1W", "1M", "3M", "6M", "YTD", "1Y", "5Y", "ALL"]);
+    const range = validRanges.has(requestedRange) ? requestedRange : "1W";
+    const bundledFallback = getBundledGseIndicesFallback();
+    if (bundledFallback && bundledFallback.historyByCode[code]) {
+      console.log(`Index history route: serving bundled fallback for ${code}`);
+      return res.json(filterRowsByRange(bundledFallback.historyByCode[code], range));
+    }
     return res.status(500).json({ error: "Failed to fetch index history" });
   }
 });
