@@ -65,7 +65,9 @@ const NEWS_REQUEST_HEADERS = {
   Accept: "text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 const KWAYISI_REQUEST_HEADERS = {
-  "User-Agent": "Plutus/1.0 (GSE market data app)",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/javascript,application/json,text/plain;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
 };
 const WIKIPEDIA_REQUEST_HEADERS = {
   "User-Agent":
@@ -3182,7 +3184,6 @@ function requestJsonWithTimeout(url, options = {}) {
         parsedUrl,
         {
           method: "GET",
-          family: 4,
           headers: {
             Accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
             "Accept-Encoding": "identity",
@@ -3418,7 +3419,6 @@ function requestTextWithTimeout(url, options = {}) {
         parsedUrl,
         {
           method: "GET",
-          family: 4,
           headers: {
             Accept: "text/html,application/javascript,text/plain;q=0.9,*/*;q=0.8",
             "Accept-Encoding": "identity",
@@ -4061,6 +4061,8 @@ async function scrapeKwayisiChartData(symbol, range = "ALL") {
     headers: KWAYISI_REQUEST_HEADERS,
   });
 
+  console.log(`[Scrape] ${url} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
+
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`Kwayisi chart ${normalizedSymbol} failed: ${response.statusCode}`);
   }
@@ -4155,18 +4157,25 @@ async function refreshGseIndicesCache() {
 
   gseIndexCache.pending = (async () => {
     const chartFetchPromise = (async () => {
-      const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
-        timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
-        headers: KWAYISI_REQUEST_HEADERS,
-      });
+      try {
+        const response = await requestTextWithTimeout(KWAYISI_CHART_API_BASE, {
+          timeoutMs: Math.max(KWAYISI_CHART_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
+          headers: KWAYISI_REQUEST_HEADERS,
+        });
 
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
+        console.log(`[Scrape] ${KWAYISI_CHART_API_BASE} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
+
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw new Error(`Kwayisi indices failed: ${response.statusCode}`);
+        }
+
+        return {
+          scriptText: String(response.body || ""),
+        };
+      } catch (error) {
+        console.error("Index chart fetch failed:", error?.message || error);
+        return { scriptText: "" };
       }
-
-      return {
-        scriptText: String(response.body || ""),
-      };
     })();
 
     const pageFetchPromise = (async () => {
@@ -4175,6 +4184,8 @@ async function refreshGseIndicesCache() {
           timeoutMs: Math.max(KWAYISI_DEFAULT_TIMEOUT_MS, KWAYISI_RETRY_TIMEOUT_MS),
           headers: KWAYISI_REQUEST_HEADERS,
         });
+
+        console.log(`[Scrape] ${KWAYISI_GSE_PAGE_URL} - Status: ${response.statusCode} - Length: ${response.body?.length || 0}`);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
           throw new Error(`Kwayisi GSE page failed: ${response.statusCode}`);
@@ -4185,11 +4196,8 @@ async function refreshGseIndicesCache() {
         };
       } catch (error) {
         console.error("Kwayisi GSE page fallback failed:", error?.message || error);
+        return { pageText: "" };
       }
-
-      return {
-        pageText: "",
-      };
     })();
 
     const [
@@ -4995,7 +5003,26 @@ app.get("/api/indices", async (req, res) => {
     res.json(data.summaries);
   } catch (error) {
     console.error("Indices route failed:", error);
-    res.status(500).json({ error: "Failed to fetch indices" });
+    res.status(500).json({ error: "Failed to fetch indices", message: error?.message });
+  }
+});
+
+app.get("/api/debug/scrape", async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).send("No URL");
+  try {
+    const response = await requestTextWithTimeout(url, {
+      headers: KWAYISI_REQUEST_HEADERS,
+      timeoutMs: 15000
+    });
+    res.json({
+      status: response.statusCode,
+      bodyLength: response.body.length,
+      bodyPreview: response.body.substring(0, 2000),
+      headers: KWAYISI_REQUEST_HEADERS
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
