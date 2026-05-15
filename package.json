@@ -18,5 +18,8 @@
     "@capacitor/android": "^8.3.0",
     "@capacitor/cli": "^7.6.1",
     "@capacitor/core": "^8.3.0"
+  },
+  "devDependencies": {
+    "@railway/cli": "^4.58.0"
   }
 }
