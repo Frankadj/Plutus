@@ -1,7 +1,20 @@
 services:
   - type: web
     name: plutus
-    env: docker
-    plan: free
-    autoDeploy: true
+    runtime: docker
+    plan: starter
+    autoDeployTrigger: commit
     healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: DB_DIR
+        value: /data
+    disk:
+      name: plutus-data
+      mountPath: /data
+      sizeGB: 1
