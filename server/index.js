@@ -3422,7 +3422,17 @@ async function fetchWithPlaywright(url, options = {}) {
     }
 
     const statusCode = response.status();
-    const body = await page.content();
+    let body = "";
+
+    try {
+      body = await response.text();
+    } catch (responseTextError) {
+      console.warn(
+        `[Playwright] Failed to read response body for ${url}, falling back to page content:`,
+        responseTextError?.message || responseTextError
+      );
+      body = await page.content();
+    }
     
     console.log(`[Playwright] Finished ${url} - Status: ${statusCode} - Length: ${body.length}`);
     
